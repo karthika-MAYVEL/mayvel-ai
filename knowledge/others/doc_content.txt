@@ -1,0 +1,258 @@
+SEYO-AI : core theme playbook
+SEYO.AI
+Engineering Development Rulebook
+Python FastAPI + LLM Microservice
+Version 1.0  |  2026
+Intelligent System for Better Audits and Better Business
+Introduction
+This rulebook defines the complete engineering lifecycle for every microservice built within the Seyo.ai platform. Seyo.ai is an intelligent SaaS platform for safety, quality, and inspection audits — serving industries such as manufacturing, services, oil & gas, and compliance-heavy operations. Every line of code we write must reflect the same values Seyo brings to its users: structure, clarity, intelligence, and reliability.
+This document is written for developers at every level — including those who are new to professional software development. Follow each phase in sequence. Do not skip steps. Every phase exists to protect Seyo's users, team, and platform.
+Phase 1 — Gathering Scope
+Before writing a single line of code, every feature must be fully understood from the user's perspective. Seyo serves real people — safety auditors, compliance managers, team leads — who rely on our platform to do their jobs. We build nothing unless we understand why a user needs it and how they will discover and use it.
+1.1 Who Is the User?
+Start by defining who will use this feature. For Seyo, our users include:
+Safety auditors and inspectors in the field
+Compliance managers tracking ISO, OSHA, or FDA standards
+Operations managers overseeing multiple sites
+Team owners scheduling and approving inspections
+Write a paragraph before defining any feature. Name the role. Describe their day. Identify their frustration - pain point that reflects the need of the feature.
+1.2 What Problem Does This Solve?
+Scope Question to Answer
+Why would this user stop what they're doing, open Seyo, and ask for this feature right now? If you cannot answer that question in one sentence, the scope is not ready.
+
+Every scope document must answer all three questions below:
+Scope Question, What You Must Define
+How does this reach the user?, Via API endpoint, webhook, background job, or real-time stream? Define the integration point.
+Why does the user need this?, What breaks, slows down, or frustrates them without this? Quantify if possible.
+How does the user ask for it?, What button, voice command, API call, or trigger causes this service to run? Design the demand path.
+1.3 Scope Document Template
+Every feature must have a scope document before Phase 2 begins. Use the following structure:
+Feature Name — short, descriptive
+User Story — As a [role], I want [action] so that [outcome]
+Problem Statement — what breaks without this feature
+User Trigger — how the user initiates the service
+Expected Output — what the user receives in return
+Out of Scope — what this feature explicitly does NOT do
+Success Metrics — how we know this is working (response time, error rate, user adoption)
+Phase 2 — Validating Scope & Development Documentation
+Scope validation prevents wasted work. Before any developer writes code, the scope must be reviewed, challenged, and signed off. Documentation must be written before the code — not after.
+2.1 Scope Validation Checklist
+Every scope document must pass the following checks. A senior developer or product lead must approve before Phase 3 begins.
+#, Validation Check, Pass Criteria, Sign-off
+1, User story is written in standard format, As a / I want / So that complete, □
+2, Problem statement references a real user pain point, Specific, not generic, □
+3, Out of scope is explicitly stated, At least 2 exclusions listed, □
+4, Success metrics are measurable, Numbers or thresholds defined, □
+5, LLM usage is justified, Explains why AI is needed, not just used, □
+6, API contract is drafted, Endpoints, payloads, and response schemas defined, □
+2.2 Development Documentation Requirements
+The following documents must exist before any code is written. These live in the repository under /docs.
+API Specification — written in OpenAPI 3.0 format using FastAPI's auto-generated schema as a base
+Data Flow Diagram — shows how a request moves from the user through the LLM and back
+Error Catalog — lists every expected error, its HTTP status code, and its user-facing message
+Environment Variables Reference — documents every config value the service requires
+Dependency Matrix — lists all external services (LLM API, database, message queue) and their fallback behavior
+Phase 3 — Development
+This phase covers the actual writing of code. Seyo's LLM microservice is built with Python and FastAPI. All code must follow these standards consistently, regardless of the developer's experience level.
+3.1 Project Structure
+Every FastAPI microservice must follow this folder structure:
+Required Project Structure ai-microservice/ │ ├── application/ # Business logic layer │ ├── services/ # Core service implementations │ ├── use_cases/ # Specific workflows / orchestrations │ └── interfaces/ # Contracts between layers │ ├── domain/ # Pure domain models (optional but recommended) │ ├── models/ # Entity definitions │ ├── value_objects/ │ └── enums/ │ ├── infrastructure/ # External integrations │ ├── database/ # DB connection & repositories │ ├── external_clients/ # Third-party APIs │ ├── llm_sdk/ # AI providers abstraction │ ├── cache/ │ └── messaging/ │ ├── presentation/ # API / Interface layer │ ├── routes/ # API endpoints │ ├── schemas/ # Request/Response models │ └── middlewares/ │ ├── knowledge/ # AI-related structured knowledge (if AI-based service) │ ├── prompts/ │ ├── schemas/ │ └── templates/ │ ├── core/ # Shared internal utilities │ ├── config.py │ ├── logging.py │ ├── exceptions.py │ └── constants.py │ ├── utils/ # Helper utilities │ ├── auth.py │ ├── jwt_utils.py │ └── common_helpers.py │ ├── tests/ # Test layer │ ├── unit/ │ ├── integration/ │ └── e2e/ │ ├── scripts/ # Dev or operational scripts │ ├── seed_data.py │ ├── migrations.py │ └── maintenance_tasks.py │ ├── logs/ # Runtime logs │ ├── uploads/ # Temporary storage (if needed) │ ├── main.py # Service entry point ├── requirements.txt # Dependencies ├── Dockerfile ├── docker-compose.yml ├── .env.example ├── README.md └── Jenkinsfile / CI config
+
+3.2 Naming Conventions
+Element, Convention, Example
+Files, snake_case, inspection_service.py
+Functions, snake_case verbs, get_inspection_summary()
+Classes, PascalCase, InspectionRequest
+Constants, UPPER_SNAKE_CASE, MAX_LLM_RETRIES = 3
+API Routes, kebab-case plural nouns, /api/v1/inspections/{id}/summary
+Environment Variables, UPPER_SNAKE_CASE, LLM_API_KEY, LLM_MODEL_NAME
+Variables, parameters, camelCase
+3.3 LLM Integration Rules
+All LLM calls must go through app/services/llm_service.py. Never call an LLM API directly from a route handler. The following rules apply to every LLM integration:
+All prompts must be defined as string constants or loaded from a prompts/ directory
+Every LLM call must have a timeout configured (recommended: 60 seconds)
+Every LLM call must be wrapped in a retry mechanism with exponential backoff (max 2 retries)
+Token limits must be set explicitly — never allow unbounded generation
+Log every LLM request and response at DEBUG level, redacting any PII fields [log the count of the LLM request per day , and token utilization separately , with the specific service name ]
+Cost tracking: 
+log estimated token usage per call and per day to support billing analysis
+3.4 API Design Rules
+All endpoints return consistent JSON envelopes: { success, data, error | message, timestamp }
+Use HTTP 422 for validation errors (FastAPI default), 400 for business logic errors, 500 for unexpected failures
+All routes must require authentication — no public endpoints unless explicitly scoped
+Versioning: all routes must be prefixed with /api/v1/
+Async all the way: use async def for all route handlers and service methods
+Phase 4 — Validating Coding Standards
+Code quality is enforced automatically using tools, not manual review alone. Every commit must pass the following checks before it can be merged.
+4.1 Linting and Formatting
+Tool, Purpose, Configuration
+Ruff, Linting and import sorting, pyproject.toml — max line length 100
+Black, Auto-formatting, pyproject.toml — line-length = 100
+mypy, Static type checking, strict mode enabled
+pre-commit, Runs all checks on every commit, .pre-commit-config.yaml in repo root
+4.2 Code Review Checklist
+Every pull request must be reviewed against these criteria before merging:
+No function longer than 50 -60 lines — split if needed
+No commented-out code — remove or document it
+Every function has a docstring explaining what it does, its parameters, and its return value
+No bare except clauses — always catch specific exception types
+No hardcoded secrets, URLs, or magic numbers — use config or constants
+All Pydantic models include field validation and descriptions
+Phase 5 — Unit Test Cases
+Unit tests are not optional. A feature is not complete until its tests are written and passing. Seyo uses pytest as the testing framework.
+5.1 Coverage Requirements
+Minimum Coverage Threshold
+All microservices must maintain a minimum of 80% code coverage measured by pytest-cov. Services with LLM integrations must mock all LLM calls — never call real LLM APIs in unit tests. The CI pipeline must block merge if coverage falls below threshold.
+
+5.2 What Must Be Tested
+Component, Test Type, What to Assert
+Route handlers, Integration (TestClient), Status codes, response schema, auth enforcement
+Service functions, Unit (mocked deps), Business logic, edge cases, error paths
+LLM service, Unit (mocked API), Prompt construction, retry logic, timeout handling
+Repository functions, Unit (mocked DB), Query construction, returned data mapping
+Pydantic schemas, Unit, Valid inputs pass, invalid inputs raise validation errors, validating response codes
+5.3 Test Naming Convention
+All test functions must follow this pattern: test_[function_name][scenario][expected_result]. Examples:
+test_get_inspection_summary_valid_id_returns_200
+test_llm_service_timeout_raises_service_exception
+test_inspection_schema_missing_field_raises_validation_error
+Phase 6 — SonarQube Analysis
+SonarQube is the static code analysis gate. No code may be deployed to staging or production unless it passes SonarQube's Quality Gate.
+6.1 Quality Gate Requirements
+Metric, Threshold, Action if Failing
+Bugs, 0 new bugs, Fix all before merge
+Vulnerabilities, 0 critical/high, Fix or get security approval
+Code Smells, < 5 new per PR, Clean up before merge
+Duplicated Lines, < 3%, Extract to shared utility
+Test Coverage, > 80%, Write more tests
+Security Hotspots, All reviewed, Developer must explain each hotspot
+6.2 SonarQube Integration
+SonarQube scans run automatically on every pull request via CI/CD
+Results appear as PR comments — fix issues before requesting review
+The SonarQube dashboard is the single source of truth for code quality trends
+Security hotspots must be reviewed and marked as either Safe or as Issues — never left unreviewed
+Phase 7 — Validating Hardcore Metrics
+Every service must meet concrete, measurable performance targets before it ships. These are not aspirational — they are requirements.
+7.1 LLM Microservice Performance Targets
+Metric, Target, Measurement Method
+API p50 Response Time, < 500ms, Locust or k6 load test — excluding LLM call time
+API p95 Response Time, < 2000ms, 95th percentile over 1000 requests
+LLM Response Time, < 1min, Measured end-to-end at service layer
+Error Rate (non-LLM), < 0.5%, 5xx errors as % of total requests
+LLM Error Rate, < 2%, Includes timeouts and provider errors
+Throughput, > 100 RPS, At sustained load without degradation
+Memory Usage, < 512MB under load, Monitored via container metrics
+CPU Usage, < 70% sustained, Average over 5 minute window under load
+7.2 How to Measure
+Run load tests using k6 or Locust before every release
+Store test results as artifacts in the CI pipeline — compare against baseline from previous release
+A regression of more than 20% on any metric blocks the release
+Phase 8 — Coding Standards Re-Validation
+Before any code moves to staging, a final standards pass is run. This is a second look — not the same as Phase 4 — focused on integration-level concerns that only become visible when the full service is assembled.
+8.1 Integration-Level Standards Checks
+API contract matches the OpenAPI spec written in Phase 2 — run Schemathesis for contract testing
+All environment variables used in code are documented in .env.example
+No debug logs at INFO level or above in production code paths
+Structured logging is used throughout — no print() statements
+All database queries use parameterized statements — no string interpolation in SQL
+Secrets are loaded via config only — never appear in code, logs, or error messages
+All FastAPI dependency injections are tested with actual dependency overrides
+8.2 Documentation Currency
+At this point, verify that all documents created in Phase 2 still accurately describe the system that was built. Update any documents that have drifted from implementation. The docs and the code must match.
+Phase 9 — Validating Service Bottlenecks
+Bottleneck analysis identifies the slowest parts of the system before users experience them. For LLM-integrated services, the LLM itself is almost always the primary bottleneck — but the surrounding infrastructure can amplify or hide it.
+9.1 Bottleneck Identification Process
+Profile the service under realistic load using cProfile or py-spy to find slow Python code
+Use distributed tracing (OpenTelemetry with a Jaeger or Tempo backend) to visualize where time is spent across service calls
+Separately time: (a) network overhead, (b) database queries, (c) LLM API call, (d) response serialization
+Identify the single step that accounts for more than 50% of total response time — that is the primary bottleneck
+9.2 Common Bottlenecks and Mitigations
+Bottleneck, Symptoms, Mitigation
+LLM API latency, p95 > 5s, timeouts, Streaming responses, caching identical prompts, smaller models for simple tasks
+Synchronous DB calls, CPU idle, high wait time, Use async database drivers (asyncpg, databases)
+Large response payloads, High serialization time, Paginate, trim unnecessary fields, use compression
+N+1 queries, DB calls spike with load, Use JOIN or batch loading, add query logging
+No connection pooling, Connection exhaustion under load, Use asyncpg pool or SQLAlchemy async pool
+Phase 10 — Validating Vulnerabilities
+Security is non-negotiable for Seyo. Our platform holds sensitive compliance and audit data for real organizations. A security failure is a failure of trust.
+10.1 Automated Security Scanning
+Tool, What It Finds, When It Runs
+Bandit, Python code vulnerabilities (hardcoded passwords, shell injection, insecure calls), Every PR via CI
+Safety / pip-audit, Known CVEs in Python dependencies, Every PR + weekly scheduled scan
+Trivy, Container image vulnerabilities, On every Docker image build
+SonarQube, Security hotspots in application code, Every PR (see Phase 6)
+OWASP ZAP, Runtime API security scan, On staging before every production deploy
+10.2 LLM-Specific Security Rules
+LLM integrations introduce unique risks that standard scanners do not catch. All of the following must be enforced:
+Prompt Injection Prevention — never concatenate raw user input directly into a prompt. Always sanitize and structure user input as data, not as instructions
+Output Validation — never pass LLM output directly to a database, file system, or shell command without validation
+Token Limit Enforcement — always set max_tokens to prevent cost amplification attacks
+API Key Rotation — LLM API keys must be rotated every 90 days and stored in a secret manager, never in environment files committed to git
+Phase 11 — Validating Failure & Overload Scenarios
+Systems fail. Seyo's users are in the field conducting safety inspections — they cannot afford a service that crashes under load or fails silently. We validate failure modes before they happen to real users.
+11.1 Failure Mode Testing
+Failure Scenario, Expected Behavior, How to Test
+LLM API is down, 503 returned with retry-after header; user sees friendly message, Mock LLM to return 500; verify fallback
+LLM API timeout, Request fails after 30s; circuit breaker opens after 5 failures, Set timeout to 1ms in test; verify timeout handling
+Database unavailable, 503 returned; no data corruption; reconnect attempted, Kill DB connection; verify graceful degradation
+Request overload (>500 RPS), Rate limiting returns 429; queue backs up gracefully, k6 spike test to 500+ RPS
+Memory exhaustion, Container restarts; no data loss; alert triggered, Chaos engineering tool or memory stress test
+Malformed LLM response, Parsing error caught; fallback or retry; never 500 to user, Mock LLM to return garbage JSON
+Phase 12 — Automated Test Cases
+Automated tests are the safety net that allows Seyo to move fast without breaking things. The test pyramid below defines how tests are distributed and when they run.
+12.1 The Seyo Test Pyramid
+Test Distribution Target
+Unit Tests (70%) — Fast, isolated, run on every commit. Mock all external deps.Integration Tests (20%) — Test service-to-service interactions. Use test containers.End-to-End Tests (10%) — Full API flow tests. Run in staging before production deploy.
+
+12.2 CI/CD Pipeline Gates
+Pipeline Stage, Tests Run, Pass Criteria, Blocks Merge?
+On every commit, Unit tests, linting, mypy, All pass, coverage > 80%, Yes
+On pull request, Unit + integration + Sonar + Bandit, All gates pass, Yes
+On merge to main, Full test suite + performance baseline, No regression > 20%, Yes
+Before staging deploy, E2E tests + OWASP ZAP, Zero critical findings, Yes
+Before production deploy, Smoke tests + load test, All metrics within targets, Yes
+12.3 Test Data Strategy
+Never use real user data in tests — use factories (factory_boy) to generate realistic synthetic data
+All test databases must be isolated per test run — use pytest fixtures with database rollback or test containers
+LLM responses in tests must be recorded using VCR.py cassettes or mocked with pytest-mock
+Phase 13 — Development Timeline
+Every feature follows a structured timeline. These durations are baselines for a standard microservice feature. Complex features may take longer — adjust with team agreement and document the reason.
+13.1 Standard Feature Timeline
+Phase, Activity, Duration, Exit Criteria
+1, Scope Gathering, , Scope document complete
+2, Scope Validation + Documentation, , Sign-off obtained, API spec written
+3, Development, , Feature code complete and locally tested
+4, Coding Standards Validation, , All linting, typing, review checklist pass
+5, Unit Tests, , Coverage > 80%, all tests green
+6, SonarQube, , Quality gate passed
+7, Metrics Validation, , Performance targets met
+8, Standards Re-Validation, , Docs match implementation
+9, Bottleneck Analysis, , No unaddressed bottlenecks
+10, Vulnerability Scan, , Zero critical findings
+11, Failure Scenario Testing, , All failure modes validated
+12, Automated Tests + CI/CD, , Full pipeline green
+—, Total (typical feature), , Ready for staging deployment
+13.2 Timeline Rules
+No phase may be skipped to meet a deadline — escalate timeline concerns instead
+Phases 9–11 may run in parallel after Phase 8 is complete
+Hotfixes follow an accelerated path: Phases 3, 4, 5, and 12 only — with team lead approval
+Every delay of more than 2 days from the baseline must be documented with a reason
+Appendix — Quick Reference
+A.1 Tool Stack Summary
+Category, Tool, Purpose
+Framework, FastAPI + Python 3.11+, Async API with auto-generated OpenAPI docs
+Linting, Ruff + Black + mypy, Code quality and type safety
+Testing, pytest + pytest-cov, Test runner and coverage reporting
+Security, Bandit + pip-audit + Trivy, Static and dependency vulnerability scanning
+Code Quality, SonarQube, Continuous quality gate
+Load Testing, k6 or Locust, Performance and bottleneck validation
+Tracing, OpenTelemetry + Jaeger, Distributed request tracing
+LLM Resilience, tenacity (retry + circuit breaker), Fault-tolerant LLM calls
+Rate Limiting, slowapi, FastAPI rate limiting middleware
+Pre-commit, pre-commit hooks, Enforce standards before every commit
+A.2 The Seyo Engineering Principles
+These four principles underpin every decision in this rulebook:
+Clarity First — every piece of code, every API response, every error message must be understandable by the next person who reads it. Seyo brings clarity to audits; our code must be no different.
+Build for the User — every technical decision traces back to a real user need. If you cannot explain how a technical choice benefits an auditor, compliance manager, or operations lead, question whether the choice is right.
+Reliable by Default — Seyo's users depend on us during real safety inspections. Unreliable software creates real-world risk. Resilience, error handling, and testing are not extras — they are the core of the product.
+Structure Enables Speed — following this rulebook takes time upfront. It saves multiples of that time later. Structured development means fewer bugs, faster debugging, and confident deployments.

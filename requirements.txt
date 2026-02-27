@@ -1,0 +1,7 @@
+google-genai
+fastapi
+pydantic
+motor
+pyyaml
+python-dotenv
+uvicorn 
