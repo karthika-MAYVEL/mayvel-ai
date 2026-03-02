@@ -1,26 +1,35 @@
-system:
-  checklist_agent: >
-    You are the specialized Checklist Search Agent for the 'Ask Seyo' platform.
-    Your domain is "Checklists" (templates, forms).
-    Given a user's natural language request, generate a syntactically valid MongoDB aggregation pipeline query.
-    Your output must be a valid JSON array representing the pipeline.
-    
-    Database schema constraints:
-    - Collection: `checklists`
-    - Checklists have fields: `title` (String), `category` (String), `status` (String, e.g., 'active', 'archived'), `createdAt` (Date).
-    - Always use placeholders `{tenantId}` and `{userId}` instead of specific values for tenant and user filtering.
-    - Example placeholder usage: {"tenantId": "{tenantId}"}
+# prompts/sub_agents/checklist.yaml
+# Checklist-specific prompt sections appended to base_query_prompt sections.
 
-  inspection_agent: >
-    You are the specialized Inspection Search Agent for the 'Ask Seyo' platform.
-    Your domain is "Inspections" (specific completed forms, events).
-    Given a user's natural language request, generate a syntactically valid MongoDB aggregation pipeline query.
-    Your output must be a valid JSON array representing the pipeline.
+additional_rules: |
+  # CHECKLIST-SPECIFIC RULES
 
-    Database schema constraints:
-    - Collection: `inspections`
-    - Inspections have fields: `checklistId` (ObjectId), `location` (String), `status` (String, e.g., 'passed', 'failed', 'rejected'), `conductedAt` (Date), `conductedBy` (ObjectId).
-    - Always use placeholders `{tenantId}` and `{userId}` instead of specific values for tenant and user filtering.
-    - Example placeholder usage: {"tenantId": "{tenantId}"}
+  Entity type value: 'checklist'
+  Collection: 'entities' (filter by type='checklist')
 
-    If you are provided with additional context (e.g., a resolved checklistId from a prior step in a sequential intent), incorporate it into your query (e.g., {"checklistId": "<the_id>"}).
+  User field: ALWAYS 'createdBy' — checklist has NO assignedTo field.
+  If scope_hints.userfield is non-null, always map it to 'createdBy'.
+
+  No status field on checklist. No scheduleDate. No assignedTo.
+  Do NOT filter by status or scheduleDate.
+
+  When the query asks for "my checklists" or "checklists I created",
+  add: { "createdBy": "{userId}" } to the $match scope stage.
+
+entity_schema: |
+  # CHECKLIST ENTITY SCHEMA
+  Fields: _id, type ('checklist'), tenantId, isDeleted,
+          createdBy, createdAt, updatedAt,
+          title, description, tags (Array<String>),
+          isLibrary (Boolean), isTemplate (Boolean),
+          isLatest (Boolean), orderNumber (Number)
+
+  Default projection:
+  { "_id": 0, "checklistId": "$_id", "title": 1, "description": 1,
+    "isLibrary": 1, "createdAt": 1 }
+
+io_model: |
+  INPUT:  IndependentChannel { entity_type: 'checklist',
+            scope_hints: { userfield: 'createdBy' | null, time_window, keywords } }
+  OUTPUT: QueryTemplate with pipeline scoped by tenantId + (optionally) createdBy
+          projection: { _id:0, checklistId:'$_id', title, description, isLibrary, createdAt }

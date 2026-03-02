@@ -1,5 +1,5 @@
 from motor.motor_asyncio import AsyncIOMotorClient
-from core.config import settings
+from config.settings import settings
 from core.logger import get_app_logger
 
 logger = get_app_logger("database")

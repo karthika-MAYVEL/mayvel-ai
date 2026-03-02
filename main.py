@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ask Seyo API Gateway", lifespan=lifespan)
 
 # Mount the defined API routes
-app.include_router(search_router, prefix="/api/v1")
+app.include_router(search_router, prefix="/api/v1/ai")
 
 if __name__ == "__main__":
     logger.info(f"Starting Ask Seyo Gateway on {settings.HOST}:{settings.PORT}...")

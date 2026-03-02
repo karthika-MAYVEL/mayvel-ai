@@ -1,0 +1,29 @@
+# prompts/sub_agents/activity.yaml
+# Activity-specific prompt sections appended to base_query_prompt shared sections.
+
+additional_rules: |
+  # ACTIVITY-SPECIFIC RULES
+
+  Entity type value: 'activity'
+  Collection: 'entities' (filter by type='activity')
+
+  User field: 'assignedTo' by default.
+  Use 'createdBy' only when explicit creator intent is detected.
+
+  Activities represent scheduled or ad-hoc actions / events tied to a site or project.
+
+entity_schema: |
+  # ACTIVITY ENTITY SCHEMA
+  Fields: _id, type ('activity'), tenantId, isDeleted,
+          createdBy, createdAt, updatedAt,
+          title, assignedTo, status (String),
+          scheduleDate (Date), tags (Array<String>)
+
+  Default projection:
+  { "_id": 0, "activityId": "$_id", "title": 1, "status": 1, "assignedTo": 1,
+    "scheduleDate": 1, "createdAt": 1 }
+
+io_model: |
+  INPUT:  IndependentChannel { entity_type: 'activity', scope_hints: { userfield, time_window } }
+  OUTPUT: QueryTemplate — user-scoped when userfield is non-null
+          projection: { _id:0, activityId:'$_id', title, status, assignedTo, scheduleDate, createdAt }

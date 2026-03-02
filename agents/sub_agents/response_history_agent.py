@@ -1,8 +1,17 @@
+# agents/sub_agents/response_history_agent.py
+# ResponseHistory sub-agent: generates MongoDB QueryTemplates for responseHistory entities.
+
 from agents.sub_agents.base_agent import BaseSubAgent
+
 
 class ResponseHistoryAgent(BaseSubAgent):
     """
-    Placeholder agent for response_history.
+    Sub-agent for the 'responseHistory' entity type.
+    Chain-only: root of the responseHistory → execution → inspection chain.
+    Mandatory deduplication and optional scoring pipeline stages.
     """
-    def generate_query(self, user_query: str, context: dict = None) -> str:
-        return "[]"
+
+    entity_type = "responseHistory"
+
+    def get_entity_type(self) -> str:
+        return self.entity_type

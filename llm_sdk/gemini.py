@@ -1,7 +1,7 @@
 from google import genai
 from google.genai import types
 
-from core.config import settings
+from config.settings import settings
 from core.logger import get_app_logger
 
 logger = get_app_logger("llm_sdk.gemini")

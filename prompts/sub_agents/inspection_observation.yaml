@@ -1,0 +1,30 @@
+# prompts/sub_agents/inspection_observation.yaml
+# InspectionObservation-specific prompt sections appended to base_query_prompt shared sections.
+
+additional_rules: |
+  # INSPECTION OBSERVATION-SPECIFIC RULES
+
+  Entity type value: 'inspectionObservation'
+  Collection: 'entities' (filter by type='inspectionObservation')
+
+  ⚠️ CHAIN ONLY — chain through execution → inspection.
+  inspectionObservation has no direct user field.
+  User scope is resolved through the parent inspection.
+
+  Observations are notes, issues, or flags raised during an inspection execution.
+
+entity_schema: |
+  # INSPECTION OBSERVATION ENTITY SCHEMA
+  Fields: _id, type ('inspectionObservation'), tenantId, isDeleted,
+          createdBy, createdAt, updatedAt,
+          executionId (ObjectId), inspectionId (ObjectId),
+          title, description, status (String), tags (Array<String>)
+
+  Default projection:
+  { "_id": 0, "observationId": "$_id", "title": 1, "description": 1, "status": 1, "createdAt": 1 }
+
+io_model: |
+  INPUT:  ChainChannel { root_entity: 'inspectionObservation',
+            chain: ['inspectionObservation','execution','inspection'] }
+  OUTPUT: QueryTemplate scoped by tenantId
+          projection: { _id:0, observationId:'$_id', title, description, status, createdAt }

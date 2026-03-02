@@ -1,0 +1,71 @@
+# prompts/sub_agents/base_query_prompt.yaml
+# Shared system-prompt sections inherited by every sub-agent.
+# Entity-specific YAMLs append additional_rules and entity_schema on top.
+
+sections:
+
+  security_instructions:
+    content: |-
+      # SECURITY (MANDATORY — HIGHEST PRIORITY)
+
+      You MUST use EXACT placeholder strings in every generated pipeline:
+      - "{tenantId}" — tenant isolation (NEVER use actual UUIDs)
+      - "{userId}"   — user scoping    (NEVER use actual UUIDs)
+      - "{NOW}"      — current time    (NEVER use actual timestamps)
+
+      NEVER output real UUIDs, real timestamps, or write operators
+      ($insert, $update, $delete, $merge, $out).
+
+  scope_rules:
+    content: |-
+      # SCOPE RULES (MANDATORY)
+
+      The FIRST pipeline stage MUST be a $match that scopes by tenant:
+        { "$match": { "tenantId": "{tenantId}", "isDeleted": false } }
+
+      Add user scope ONLY when scope_hints.userfield is non-null:
+        "<userfield>": "{userId}"
+
+      Direct equality only — never wrap scoping in $expr.
+
+  operation_rules:
+    content: |-
+      # ALLOWED OPERATORS (read-only)
+      $match, $expr, $project, $group, $sort, $limit, $skip,
+      $lookup, $unwind, $addFields, $set, $count
+
+      # FORBIDDEN
+      $where, $function, $accumulator, map-reduce, $merge, $out,
+      any write operator
+
+  output_format:
+    content: |-
+      # OUTPUT FORMAT
+
+      Return ONLY valid JSON — no markdown fences, no comments:
+      {
+        "query_type": "aggregate",
+        "database": "FLATNEW",
+        "collection": "entities",
+        "entity_type": "<entity_type>",
+        "filter": {},
+        "pipeline": [ /* stages using placeholder strings */ ],
+        "time_field": "<createdAt|updatedAt|null>",
+        "time_window": { "kind": "...", "amount": N } | null,
+        "userfield": "<assignedTo|createdBy|null>",
+        "userfield_reason": "<one line>",
+        "deduplication_applied": false,
+        "scoring_applied": false,
+        "placeholders_used": ["tenantId", "userId"],
+        "explanation": "<one-line reasoning>"
+      }
+
+      Omit time_window if no time window applies.
+      Add "now" to placeholders_used only when {NOW} appears in the pipeline.
+
+# Assembly order for _build_system() in BaseSubAgent
+assembly_order:
+  - security_instructions
+  - scope_rules
+  - operation_rules
+  - output_format

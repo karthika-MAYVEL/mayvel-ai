@@ -1,126 +1,138 @@
-import json
-import asyncio
+# core/orchestrator.py
+# Orchestrator: coordinates the full search pipeline using RootAgent + sub-agents.
 
-from agents.root_agent import classify_intent
-from agents.checklist_agent import ChecklistAgent
-from agents.inspection_agent import InspectionAgent
+import time
+from typing import Any
+
+from agents.root_agent import RootAgent
+from agents.agent_registry import get_agent
+from core.query_assembler import resolve
+from models.search_request import SearchRequest
+from models.search_response import SearchResponse, ResultGroup
 from core.logger import get_app_logger
 
 logger = get_app_logger("orchestrator")
 
+_COLLECTION = "entities"
+_MAX_RESULTS = 200
+
+
 class SearchOrchestrator:
     """
-    The main Orchestrator entry point for the Search system.
-    Receives the request, moves it to the Root Agent for planning (intent classification),
-    and then manages the execution handovers to the specialized Sub-Agents.
+    Full pipeline coordinator.
+    1. Root Agent classifies the query into a ChannelPlan.
+    2. Each channel gets its sub-agent; sub-agent returns a QueryTemplate.
+    3. Assembler resolves placeholders → executable pipeline.
+    4. Executor runs the pipeline against MongoDB.
+    5. Results are merged into a SearchResponse.
     """
+
     def __init__(self):
-        self.checklist_agent = ChecklistAgent()
-        self.inspection_agent = InspectionAgent()
+        self._root_agent = RootAgent()
 
-    async def execute_search(self, user_query: str, db=None, executor=None) -> dict:
+    async def search(self, request: SearchRequest, db=None) -> SearchResponse:
         """
-        Orchestrates the resolution of a user query.
-        1. Planning: Passes query to Root Agent.
-        2. Execution: Delegates to the appropriate Sub-Agent (or handles Sequential flow).
-        
-        Args:
-            user_query (str): The natural language query from the user.
-            db: Current MongoDB database instance.
-            executor: QueryExecutor instance for security sanitization.
-            
-        Returns:
-            dict: The orchestration result containing the final database pipelines.
+        End-to-end search execution.
+
+        @param request: The validated SearchRequest from the API layer.
+        @param db: Live Motor database instance (None = mock/no-DB mode).
+        @returns: A structured SearchResponse.
         """
-        logger.info(f"Orchestrator handling query handover: '{user_query}'")
-        
-        # Planning Phase: Root Agent decides the intent
-        classification = classify_intent(user_query)
-        intent = classification.intent
-        logger.info(f"Root Agent Plan: Classified intent as '{intent}' (Confidence: {classification.confidence})")
+        start_ms = int(time.monotonic() * 1000)
+        logger.info(f"Orchestrator search start: '{request.query[:80]}'")
 
-        response_data = {
-            "intent": intent,
-            "queries": [],
-            "messages": []
-        }
+        plan = await self._root_agent.plan(request)
+        logger.info(
+            f"ChannelPlan: {len(plan.independent)} independent, "
+            f"{len(plan.chains)} chains"
+        )
 
-        # Execution Phase
-        if intent == "Checklist":
-            # Delegate to Checklist Agent
-            logger.info("Delegating execution to Checklist Sub-Agent.")
-            query_str = self.checklist_agent.generate_query(user_query)
+        groups: list[ResultGroup] = []
+        channels_queried: list[str] = []
+
+        # ── Independent channels ─────────────────────────────────────────────
+        for channel in plan.independent:
+            entity = channel.entity_type
             try:
-                parsed_query = json.loads(query_str)
-                pipe = parsed_query.get("pipeline", parsed_query) if isinstance(parsed_query, dict) else parsed_query
-                if isinstance(pipe, dict): pipe = [pipe]
-                response_data["queries"].append({"collection": "checklists", "pipeline": pipe})
-            except json.JSONDecodeError:
-                response_data["messages"].append("Failed to parse Checklist Agent query.")
-                response_data["queries"].append({"collection": "checklists", "pipeline": query_str})
-
-        elif intent == "Inspection":
-            # Delegate to Inspection Agent
-            logger.info("Delegating execution to Inspection Sub-Agent.")
-            query_str = self.inspection_agent.generate_query(user_query)
-            try:
-                parsed_query = json.loads(query_str)
-                pipe = parsed_query.get("pipeline", parsed_query) if isinstance(parsed_query, dict) else parsed_query
-                if isinstance(pipe, dict): pipe = [pipe]
-                response_data["queries"].append({"collection": "inspections", "pipeline": pipe})
-            except json.JSONDecodeError:
-                response_data["messages"].append("Failed to parse Inspection Agent query.")
-                response_data["queries"].append({"collection": "inspections", "pipeline": query_str})
-
-        elif intent == "Sequential":
-            # Sequential Execution
-            logger.info("Orchestrator starting Sequential Intent execution: Dispatching to Checklist Agent first.")
-            checklist_query_str = self.checklist_agent.generate_query(user_query)
-            
-            try:
-                parsed_checklist_query = json.loads(checklist_query_str)
-                c_pipe = parsed_checklist_query.get("pipeline", parsed_checklist_query) if isinstance(parsed_checklist_query, dict) else parsed_checklist_query
-                if isinstance(c_pipe, dict): c_pipe = [c_pipe]
-                response_data["queries"].append({"collection": "checklists", "pipeline": c_pipe})
-                
-                context = {}
-                if db is not None and executor is not None:
-                    safe_pipe = executor.prepare_query(c_pipe)
-                    cursor = db["checklists"].aggregate(safe_pipe)
-                    checklists = await cursor.to_list(length=1)
-                    if checklists:
-                        found_id = str(checklists[0].get("_id", ""))
-                        context = {"checklistId": found_id}
-                        response_data["messages"].append(f"Executed checklist query. Found checklistId: {found_id}")
-                    else:
-                        response_data["messages"].append("Executed checklist query. No checklist found.")
-                else:
-                    mock_checklist_id = "mock_checklist_id_123"
-                    context = {"checklistId": mock_checklist_id}
-                    response_data["messages"].append(f"Mock executed checklist query. Found checklistId: {mock_checklist_id}")
-                
-                logger.info(f"Orchestrator Handover to Inspection Agent with context: {context}")
-                inspection_query_str = self.inspection_agent.generate_query(user_query, context=context)
-                
-                parsed_inspection_query = json.loads(inspection_query_str)
-                i_pipe = parsed_inspection_query.get("pipeline", parsed_inspection_query) if isinstance(parsed_inspection_query, dict) else parsed_inspection_query
-                if isinstance(i_pipe, dict): i_pipe = [i_pipe]
-                response_data["queries"].append({"collection": "inspections", "pipeline": i_pipe})
-                
-            except json.JSONDecodeError:
-                response_data["messages"].append("Failed to parse sequential queries.")
+                agent = get_agent(entity)
+                template = await agent.generate(channel, request.query)
+                pipeline = resolve(
+                    template.pipeline,
+                    tenant_id=request.tenantId,
+                    user_id=request.userId,
+                )
+                pipeline = _apply_limit(pipeline, request.limit)
+                items = await _run_pipeline(db, pipeline)
+                groups.append(ResultGroup(entity_type=entity, count=len(items), items=items))
+                channels_queried.append(entity)
+                logger.info(f"Channel '{entity}': {len(items)} results")
             except Exception as e:
-                response_data["messages"].append(f"Execution failed during sequential router step: {e}")
+                logger.error(f"Channel '{entity}' failed: {e}")
+                groups.append(ResultGroup(entity_type=entity, count=0, items=[]))
 
-        else:
-            response_data["messages"].append("Unknown intent. Cannot route.")
+        # ── Chain channels ────────────────────────────────────────────────────
+        for chain_channel in plan.chains:
+            root_entity = chain_channel.root_entity
+            try:
+                agent = get_agent(root_entity)
+                template = await agent.generate(chain_channel, request.query)
+                pipeline = resolve(
+                    template.pipeline,
+                    tenant_id=request.tenantId,
+                    user_id=request.userId,
+                )
+                pipeline = _apply_limit(pipeline, request.limit)
+                items = await _run_pipeline(db, pipeline)
+                groups.append(ResultGroup(entity_type=root_entity, count=len(items), items=items))
+                channels_queried.append(root_entity)
+                logger.info(f"Chain '{root_entity}': {len(items)} results")
+            except Exception as e:
+                logger.error(f"Chain '{root_entity}' failed: {e}")
+                groups.append(ResultGroup(entity_type=root_entity, count=0, items=[]))
 
-        return response_data
+        total = sum(g.count for g in groups)
+        elapsed_ms = int(time.monotonic() * 1000) - start_ms
 
-if __name__ == "__main__":
-    async def test():
-        orchestrator = SearchOrchestrator()
-        result = await orchestrator.execute_search("Show me all inspections for the fire safety checklist")
-        print(json.dumps(result, indent=2))
-        
-    asyncio.run(test())
+        return SearchResponse(
+            summary=_build_summary(total, channels_queried, request.query),
+            total_count=total,
+            groups=groups,
+            metadata={
+                "channels_queried": channels_queried,
+                "query_time_ms": elapsed_ms,
+                "coverage_reason": plan.coverage_reason,
+            },
+        )
+
+    # Kept for backward-compat with SearchService until it is updated
+    async def execute_search(self, user_query: str, db=None, executor=None) -> dict:
+        """Legacy shim — wraps search() for the existing SearchService."""
+        request = SearchRequest(query=user_query, tenantId="", userId="")
+        response = await self.search(request, db=db)
+        return response.model_dump()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _apply_limit(pipeline: list, limit: int) -> list:
+    """Injects a $limit stage if none is present."""
+    has_limit = any("$limit" in stage for stage in pipeline)
+    if not has_limit:
+        return [*pipeline, {"$limit": min(limit, _MAX_RESULTS)}]
+    return pipeline
+
+
+async def _run_pipeline(db: Any, pipeline: list) -> list:
+    """Runs an aggregation pipeline; returns [] if no db is connected."""
+    if db is None:
+        logger.warning("No DB connection — returning empty results (offline mode).")
+        return []
+    cursor = db[_COLLECTION].aggregate(pipeline)
+    return await cursor.to_list(length=_MAX_RESULTS)
+
+
+def _build_summary(total: int, channels: list[str], query: str) -> str:
+    if total == 0:
+        return f"No results found for: {query}"
+    channel_str = ", ".join(channels) if channels else "unknown"
+    return f"Found {total} result(s) across {channel_str}."

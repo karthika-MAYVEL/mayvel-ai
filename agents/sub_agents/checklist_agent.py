@@ -1,53 +1,17 @@
-import os
-import yaml
+# agents/sub_agents/checklist_agent.py
+# Checklist sub-agent: generates MongoDB QueryTemplates for checklist entities.
 
-from core.logger import get_app_logger
-from llm_sdk.gemini import GeminiClient
+from agents.sub_agents.base_agent import BaseSubAgent
 
-logger = get_app_logger("agent.checklist")
 
-class ChecklistAgent:
+class ChecklistAgent(BaseSubAgent):
     """
-    Agent responsible for translating natural language queries about checklists
-    into valid MongoDB aggregation pipelines based on authorized schema templates.
+    Sub-agent for the 'checklist' entity type.
+    Inherits all LLM orchestration and prompt assembly from BaseSubAgent.
+    Entity-specific rules and schema are loaded from prompts/sub_agents/checklist.yaml.
     """
-    
-    def __init__(self):
-        """
-        Initializes the ChecklistAgent, loads instructions from prompts.yaml,
-        and setting up the GenAI client using the configured API key.
-        """
-        # Load prompt from config
-        config_path = os.path.join(os.path.dirname(__file__), "..", "knowledge", "prompts", "prompts.yaml")
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
-        self.system_instruction = config.get("system", {}).get("checklist_agent", "")
-        self.llm = GeminiClient()
 
-    def generate_query(self, user_query: str) -> str:
-        """
-        Generates a MongoDB query string from natural language.
-        
-        Args:
-            user_query (str): The natural language string from the user.
-            
-        Returns:
-            str: A raw JSON string containing the MongoDB aggregation pipeline.
-        """
-        logger.info(f"Checklist Agent triggered for query: '{user_query}'")
-        if not self.llm.client:
-            # Fallback for local testing
-            return '[{"$match": {"tenantId": "{tenantId}"}}]'
+    entity_type = "checklist"
 
-        try:
-            response_text = self.llm.generate_json(prompt=user_query, system_instruction=self.system_instruction)
-            print("checklist agent response", response_text)
-            logger.info("Checklist Agent pipeline generated successfully.")
-            return response_text
-        except Exception as e:
-            logger.error(f"Error in ChecklistAgent: {e}")
-            return "[]"
-
-if __name__ == "__main__":
-    agent = ChecklistAgent()
-    print("Mock Output:", agent.generate_query("Show me fire safety checklists"))
+    def get_entity_type(self) -> str:
+        return self.entity_type

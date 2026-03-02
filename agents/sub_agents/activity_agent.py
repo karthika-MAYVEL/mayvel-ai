@@ -1,8 +1,16 @@
+# agents/sub_agents/activity_agent.py
+# Activity sub-agent: generates MongoDB QueryTemplates for activity entities.
+
 from agents.sub_agents.base_agent import BaseSubAgent
+
 
 class ActivityAgent(BaseSubAgent):
     """
-    Placeholder agent for activity.
+    Sub-agent for the 'activity' entity type.
+    Default userfield: assignedTo; scheduleDate available for time filtering.
     """
-    def generate_query(self, user_query: str, context: dict = None) -> str:
-        return "[]"
+
+    entity_type = "activity"
+
+    def get_entity_type(self) -> str:
+        return self.entity_type

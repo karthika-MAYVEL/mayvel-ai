@@ -1,8 +1,16 @@
+# agents/sub_agents/task_observation_agent.py
+# TaskObservation sub-agent: generates MongoDB QueryTemplates for taskObservation entities.
+
 from agents.sub_agents.base_agent import BaseSubAgent
+
 
 class TaskObservationAgent(BaseSubAgent):
     """
-    Placeholder agent for task_observation.
+    Sub-agent for the 'taskObservation' entity type.
+    Chain-only: chained through task → execution → inspection.
     """
-    def generate_query(self, user_query: str, context: dict = None) -> str:
-        return "[]"
+
+    entity_type = "taskObservation"
+
+    def get_entity_type(self) -> str:
+        return self.entity_type
