@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from models.search_request import SearchRequest
 from application.services.search_service import SearchService
 from core.logger import get_app_logger
 
@@ -8,16 +8,8 @@ logger = get_app_logger("api.ask")
 
 router = APIRouter()
 
-class AskRequest(BaseModel):
-    """
-    Request payload for the Ask Seyo endpoint.
-    """
-    query: str = Field(..., description="The natural language query from the user.")
-    tenantId: str = Field("", description="The tenant ID of the user's organization.")
-    userId: str = Field("", description="The distinct user ID making the request.")
-
 @router.post("/ask")
-async def ask_seyo(request: AskRequest):
+async def ask_seyo(request: SearchRequest):
     """
     Endpoint for accepting natural language queries to Ask Seyo.
     Delegates the step-by-step agentic orchestration to the SearchService.
