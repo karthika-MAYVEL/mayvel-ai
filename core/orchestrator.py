@@ -1,7 +1,9 @@
 # core/orchestrator.py
 # Orchestrator: coordinates the full search pipeline using RootAgent + sub-agents.
 
+import json
 import time
+from datetime import datetime
 from typing import Any
 
 from agents.root_agent import RootAgent
@@ -10,6 +12,7 @@ from core.query_assembler import resolve
 from models.search_request import SearchRequest
 from models.search_response import SearchResponse, ResultGroup
 from core.logger import get_app_logger
+import llm_sdk.token_tracker as token_tracker
 
 logger = get_app_logger("orchestrator")
 
@@ -39,6 +42,7 @@ class SearchOrchestrator:
         @returns: A structured SearchResponse.
         """
         start_ms = int(time.monotonic() * 1000)
+        token_tracker.reset()  # fresh counter for this request
         logger.info(f"Orchestrator search start: '{request.query[:80]}'")
 
         plan = await self._root_agent.plan(request)
@@ -92,6 +96,16 @@ class SearchOrchestrator:
 
         total = sum(g.count for g in groups)
         elapsed_ms = int(time.monotonic() * 1000) - start_ms
+        tokens = token_tracker.get_totals()
+
+        logger.info(
+            f"[REQUEST TOKEN SUMMARY] query='{request.query[:60]}' | "
+            f"llm_calls={tokens['llm_calls']} | "
+            f"prompt_tokens={tokens['prompt_tokens']} | "
+            f"output_tokens={tokens['output_tokens']} | "
+            f"total_tokens={tokens['total_tokens']} | "
+            f"query_time_ms={elapsed_ms}"
+        )
 
         return SearchResponse(
             summary=_build_summary(total, channels_queried, request.query),
@@ -99,8 +113,9 @@ class SearchOrchestrator:
             groups=groups,
             metadata={
                 "channels_queried": channels_queried,
-                "query_time_ms": elapsed_ms,
-                "coverage_reason": plan.coverage_reason,
+                "query_time_ms":    elapsed_ms,
+                "coverage_reason":  plan.coverage_reason,
+                "token_usage":      tokens,
             },
         )
 
@@ -128,7 +143,40 @@ async def _run_pipeline(db: Any, pipeline: list) -> list:
         logger.warning("No DB connection — returning empty results (offline mode).")
         return []
     cursor = db[_COLLECTION].aggregate(pipeline)
-    return await cursor.to_list(length=_MAX_RESULTS)
+    raw_docs = await cursor.to_list(length=_MAX_RESULTS)
+    return [_sanitize_doc(doc) for doc in raw_docs]
+
+
+def _sanitize_doc(doc: Any) -> Any:
+    """
+    Recursively converts BSON types to JSON-serialisable Python types.
+    Handles ObjectId, datetime, Decimal128, bytes, and nested dicts/lists.
+
+    @param doc: A MongoDB document (dict, list, or scalar).
+    @returns: A fully JSON-serialisable equivalent.
+    """
+    # Import lazily to keep bson as an optional dep
+    try:
+        from bson import ObjectId, Decimal128
+        _HAS_BSON = True
+    except ImportError:
+        _HAS_BSON = False
+
+    if isinstance(doc, dict):
+        return {k: _sanitize_doc(v) for k, v in doc.items()}
+    if isinstance(doc, list):
+        return [_sanitize_doc(v) for v in doc]
+    if isinstance(doc, datetime):
+        return doc.isoformat()
+    if isinstance(doc, bytes):
+        import base64
+        return base64.b64encode(doc).decode()
+    if _HAS_BSON:
+        if isinstance(doc, ObjectId):
+            return str(doc)
+        if isinstance(doc, Decimal128):
+            return float(doc.to_decimal())
+    return doc
 
 
 def _build_summary(total: int, channels: list[str], query: str) -> str:

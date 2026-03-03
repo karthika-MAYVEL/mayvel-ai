@@ -1,7 +1,6 @@
 # application/services/search_service.py
 # Service layer: bridges the HTTP API with the core orchestration engine.
 
-import json
 from typing import AsyncGenerator
 
 from core.orchestrator import SearchOrchestrator
@@ -21,14 +20,14 @@ async def run_search(request: SearchRequest) -> AsyncGenerator[str, None]:
     @returns: Async generator yielding one JSON line.
     @throws ValueError: Re-raised from assembler on forbidden operators or missing placeholders.
     """
-    logger.info(f"SearchService: tenant='{request.tenantId}' query='{request.query[:80]}'")
+    logger.info(f"SearchService: tenant='{request.tenantId}' query='{request.query}'")
     db = DatabaseConnector.get_db()
     orchestrator = SearchOrchestrator()
     response = await orchestrator.search(request, db=db)
     logger.info(f"Search complete: {response.total_count} results across {len(response.groups)} groups")
 
     async def _stream():
-        yield json.dumps(response.model_dump()) + "\n"
+        yield response.model_dump_json() + "\n"
 
     return _stream()
 

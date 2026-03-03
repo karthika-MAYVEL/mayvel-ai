@@ -73,7 +73,11 @@ class BaseSubAgent(ABC):
         system = self._build_system()
         user_msg = self._build_user_message(channel, original_query)
         try:
-            raw = self._llm.generate_json(prompt=user_msg, system_instruction=system)
+            raw = self._llm.generate_json(
+                prompt=user_msg,
+                system_instruction=system,
+                agent=self.get_entity_type(),
+            )
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]

@@ -55,12 +55,16 @@ class RootAgent:
         system = self._build_system()
         user_msg = f"USER QUERY: {request.query}"
         try:
-            raw = self._llm.generate_json(prompt=user_msg, system_instruction=system)
+            raw = self._llm.generate_json(prompt=user_msg, system_instruction=system, agent="root")
+            print("Raw llm response from ROOT AGENT : ", raw)
             # Strip markdown fences if the model wraps output
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
             channel_plan = ChannelPlan.model_validate(json.loads(raw))
+
+            print("Channel plan: ", channel_plan)
+            
             logger.info(f"RootAgent plan: {len(channel_plan.independent)} independent, {len(channel_plan.chains)} chains")
             return channel_plan
         except Exception as e:

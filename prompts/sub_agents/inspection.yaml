@@ -13,7 +13,7 @@ parent_prompts_version: "v5.1"  # Inherits rules from root prompts.yaml
 # CONFIGURATION
 # ==============================================================================
 config:
-  database: "seyo-development"
+  database: "FLATNEW"
   agent: "inspection_agent"
   schema_source: "inspection_schema.md"
   validation_mode: "strict"
