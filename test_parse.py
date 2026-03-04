@@ -3,7 +3,7 @@ import json
 query_str = """
 {
   "query_type": "aggregate",
-  "database": "seyo-development",
+  "database": "FLATNEW",
   "collection": "inspections",
   "filter": {
     "tenantId": "{tenantId}",

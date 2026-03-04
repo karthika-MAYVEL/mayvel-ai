@@ -9,7 +9,7 @@ import llm_sdk.token_tracker as token_tracker
 logger = get_app_logger("llm_sdk.gemini")
 
 # Truncation limit for inline log display
-_INLINE_CHARS = 120
+_INLINE_CHARS = 120000
 
 
 def _log_agent_call(

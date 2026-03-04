@@ -1,0 +1,484 @@
+# prompts/sub_agents/groups/inspection.yaml
+# T2 · INSPECTION Group — unified domain prompt for the full inspection lifecycle.
+# Entities: inspection · checklist · section · question · execution ·
+#            responseHistory · inspectionObservation · task · taskObservation · report
+# Replaces: scheduling.yaml, execution.yaml, task.yaml (v1)
+# Version: v1.1 (aligned to inspection_agent_v2.docx)
+# Loaded by InspectionGroupAgent after shared_base sections (SB-1 – SB-10).
+
+group: INSPECTION
+entities:
+  - inspection
+  - checklist
+  - section
+  - question
+  - execution
+  - responseHistory
+  - inspectionObservation
+  - task
+  - taskObservation
+  - report
+
+group_rules: |-
+  # T2 · INSPECTION GROUP — AGENT SCOPE
+
+  This agent owns the **full inspection lifecycle**:
+  - **Content layer**:  checklist · section · question
+  - **Assignment layer**: inspection (checklist assigned to user + schedule)
+  - **Execution layer**: execution · responseHistory · inspectionObservation
+  - **Corrective action layer**: task · taskObservation
+  - **Completion artifact**: report
+
+  ## Language-Based Routing (CRITICAL — decide root entity by user word, not data lineage)
+
+  | User language                               | Root entity            | Pattern |
+  |---------------------------------------------|------------------------|---------|
+  | "my inspections", "list", "audit", "status" | inspection             | P1      |
+  | "overdue", "due this week", "scheduled"     | inspection + scheduleDate | P2   |
+  | "using checklist <name>"                    | inspection → checklist | P3      |
+  | "responses", "answers"                      | responseHistory → execution → inspection | P4 |
+  | **"issues", "problems", "open tasks"**      | **task** (direct)      | **P5a** |
+  | **"observations", "notes", "flagged"**      | **inspectionObservation** | **P5b** |
+  | "most failed", "lowest score"               | responseHistory (dedup) → question | P6 |
+
+  ⚠️ `inspectionObservation.isIssue:true` means a task was created — but do NOT pivot to
+  task unless the user's own words say "issue". Route strictly by user language.
+
+  ## User Field Rules
+  | Entity                  | User field                                          |
+  |-------------------------|-----------------------------------------------------|
+  | inspection              | assignedTo ⭐ (default) · createdBy (creator intent) |
+  | task                    | assignedTo ⭐ (direct — no chain needed)             |
+  | execution               | NONE — scope via inspection.assignedTo chain        |
+  | inspectionObservation   | NONE — scope via execution → inspection chain       |
+  | taskObservation         | NONE — scope via task.assignedTo chain              |
+  | checklist / section / question / report | No user field (tenant-wide)   |
+
+  ## Status Values (String field — filter directly on all entities)
+  inspection: yetToStart · inProgress · completed
+  task: yetToStart · inProgress · completed
+  ⚠️ Never $lookup a status collection — status is always a plain String.
+
+  ## Time Field Selection
+  | Query intent                  | Entity     | Use field    |
+  |-------------------------------|------------|--------------|
+  | Planned / scheduled / overdue | inspection | scheduleDate |
+  | Creation / submission         | any        | createdAt    |
+  | Last updated                  | any        | updatedAt    |
+  | Task time filters             | task       | createdAt or updatedAt ONLY |
+
+  ⚠️ scheduleDate exists on **inspection ONLY**. Never use scheduleDate on task or any other entity.
+
+entity_schemas: |-
+  # ENTITY SCHEMAS — INSPECTION GROUP
+
+  ## Base fields (on EVERY entity — not repeated below)
+  _id · type · tenantId · createdBy · createdAt · updatedAt · isDeleted · deletedBy · deletedAt
+
+  ---
+
+  ## inspection  [type: "inspection"]
+  Links a checklist to an assigned user with an optional scheduled date.
+  User field: assignedTo ⭐
+
+  Fields:
+    title · tags(Array) ·
+    assignedTo(String UUID) ⭐ ·
+    status(String: yetToStart|inProgress|completed) ·
+    scheduleDate(Date) ·
+    checklistId(ObjectId → checklist._id) ·
+    workflowId(ObjectId → workflow._id, optional)
+
+  ⚠️ No executionId on inspection — never filter inspection by executionId.
+  ⚠️ scheduleDate exists here ONLY — not on task or any other entity.
+
+  Default projection:
+  { "_id":1, "type":1, "title":1, "status":1, "assignedTo":1, "scheduleDate":1, "createdAt":1 }
+
+  ---
+
+  ## checklist  [type: "checklist"]
+  Versioned audit template — joined for title and name-based filtering.
+  No user field (tenant-wide).
+
+  Fields:
+    title · tags(Array) · description ·
+    isLibrary(Boolean) · isTemplate(Boolean) ·
+    isLatest(Boolean) — filter isLatest:true for current version when joining ·
+    orderNumber(Number)
+
+  ---
+
+  ## section  [type: "section"]
+  Question grouping within a checklist. No user field.
+
+  Fields:
+    title · tags(Array) ·
+    checklistId(ObjectId → checklist._id) ·
+    isMandatory(Boolean) · orderNumber(Number)
+
+  ---
+
+  ## question  [type: "question"]
+  Individual question — needed for "most failed" query display. No user field.
+
+  Fields:
+    checklistId(ObjectId → checklist._id) ·
+    sectionId(ObjectId → section._id) ·
+    questionText(String) — use for display in results ·
+    responseType(ObjectId → responseValues._id) — do NOT fetch responseValues ·
+    isMandatory(Boolean)
+
+  ⚠️ Do NOT fetch the responseValues collection — it is out of scope for this agent.
+
+  ---
+
+  ## execution  [type: "execution"]
+  1 record per question per inspection — per-question progress tracker.
+  NOT a session record. One inspection generates one execution per question.
+  No user field (no assignedTo on execution).
+
+  Fields:
+    inspectionId(ObjectId → inspection._id) ·
+    questionId(ObjectId → question._id)
+
+  Unique key per execution: (inspectionId + questionId)
+
+  ⚠️ No assignedTo on execution. For user-scoped queries:
+     join execution → inspection → filter inspection.assignedTo.
+  ⚠️ Do NOT add assignedTo to execution $match — field does not exist.
+
+  ---
+
+  ## responseHistory  [type: "responseHistory"]
+  Captured answer per execution. Mutable — user can change answers, creating multiple
+  records per (questionId, executionId). ALWAYS deduplicate immediately after $match.
+  No user field.
+
+  Fields:
+    executionId(ObjectId → execution._id) ·
+    questionId(ObjectId → question._id) ·
+    responseId(ObjectId/null → responseValues._id) ·
+    responseValue(String) ·
+    enableScore(Boolean) · scoreValue(Number) ·
+    maxScore(Number/null) · minScore(Number/null) ·
+    enforceImage(Boolean) · enforceObservation(Boolean) · enforceIssue(Boolean) ·
+    responseColor(String/null)
+
+  ⚠️ ALWAYS apply the mandatory dedup block (see below) IMMEDIATELY after $match.
+  ⚠️ Cannot reference $scoreValue, $questionId, $responseId BEFORE $replaceRoot.
+
+  ---
+
+  ## inspectionObservation  [type: "inspectionObservation"]
+  Note against a question response — ROOT entity for "observations" language.
+  No user field — scope via execution → inspection chain.
+
+  Fields:
+    executionId(ObjectId → execution._id) ·
+    questionId(ObjectId → question._id) ·
+    responseId(ObjectId/null → responseValues._id) ·
+    description(String) ·
+    isIssue(Boolean) — true = a task was created; do NOT pivot to task unless user said "issue" ·
+    hasAttachment(Boolean) · attachmentCount(Number)
+
+  ⚠️ No assignedTo on inspectionObservation.
+  ⚠️ No isResolved on inspectionObservation — isResolved lives on taskObservation.
+  ⚠️ "observations" language → this is ROOT. isIssue:true does NOT route to task.
+
+  ---
+
+  ## task  [type: "task"]  ← "issues" language ROOT
+  Corrective action created when inspectionObservation.isIssue:true.
+  User field: assignedTo ⭐ (direct — no chain needed).
+
+  Fields:
+    title ·
+    assignedTo(String UUID) ⭐ ·
+    status(String: yetToStart|inProgress|completed) ·
+    inspectionId(ObjectId → inspection._id) ·
+    executionId(ObjectId → execution._id) ·
+    questionId(ObjectId → question._id) ·
+    observationId(ObjectId → inspectionObservation._id)
+
+  ⚠️ No scheduleDate on task. Use createdAt or updatedAt for time filters.
+  ⚠️ Status is a plain String — filter directly, no $lookup needed.
+
+  ---
+
+  ## taskObservation  [type: "taskObservation"]
+  Detail of a task resolution — always joined FROM task side.
+  No user field — scope via task.assignedTo chain.
+
+  Fields:
+    executionId(ObjectId → execution._id) ·
+    questionId(ObjectId → question._id) ·
+    responseId(ObjectId/null → responseValues._id) ·
+    taskId(ObjectId → task._id) ← primary join key ·
+    description(String) ·
+    isIssue(Boolean) ·
+    isResolved(Boolean) — true = issue resolved ·
+    hasAttachment(Boolean) · attachmentCount(Number)
+
+  ⚠️ No assignedTo on taskObservation.
+  ✅ isResolved lives HERE (not on inspectionObservation).
+
+  ---
+
+  ## report  [type: "report"]
+  Completion artifact. No fields beyond base fields.
+
+  Query: type:"report" + tenantId + isDeleted:false + optional createdAt range.
+  ⚠️ Return INVALID_FIELD error if user requests any non-base field on report.
+
+dedup_block: |-
+  # MANDATORY DEDUP BLOCK — responseHistory
+
+  Apply IMMEDIATELY after the opening $match on responseHistory — before any
+  $lookup, $count, $group, $addFields, or field reference. It is a 3-stage
+  atomic unit. NEVER split. NEVER skip.
+
+  // ── MANDATORY DEDUP (apply after every responseHistory $match) ──────────
+  { "$sort": { "updatedAt": 1 } },
+  {
+    "$group": {
+      "_id": { "questionId": "$questionId", "executionId": "$executionId" },
+      "latestDoc": { "$last": "$$ROOT" }
+    }
+  },
+  { "$replaceRoot": { "newRoot": "$latestDoc" } }
+  // After $replaceRoot → all original fields restored, safe to reference.
+  // Before $replaceRoot → $scoreValue / $questionId / $responseId are FORBIDDEN.
+
+  Set deduplication_applied: true in QueryTemplate output.
+
+relationships: |-
+  # RELATIONSHIPS — INSPECTION GROUP
+
+  checklist._id             ← inspection.checklistId             (scalar $eq)
+  checklist._id             ← section.checklistId                (scalar $eq)
+  checklist._id             ← question.checklistId               (scalar $eq)
+  section._id               ← question.sectionId                 (scalar $eq)
+  inspection._id            ← execution.inspectionId             (scalar $eq)
+  question._id              ← execution.questionId               (scalar $eq)
+  execution._id             ← responseHistory.executionId        (scalar $eq)
+  question._id              ← responseHistory.questionId         (scalar $eq)
+  execution._id             ← inspectionObservation.executionId  (scalar $eq)
+  question._id              ← inspectionObservation.questionId   (scalar $eq)
+  inspection._id            ← task.inspectionId                  (scalar $eq)
+  task._id                  ← taskObservation.taskId             (scalar $eq)
+
+query_patterns: |-
+  # QUERY PATTERN LIBRARY (P1 – P6)
+
+  ## P1 — Inspection list / status filter
+  Root: inspection. Simple find or aggregate.
+  User scope: assignedTo:{userId} only when user_scoped:true.
+  Status: filter directly on status String field.
+
+  // P1a — find, no time filter
+  db.entities.find({
+    "type": "inspection", "tenantId": "{tenantId}",
+    "assignedTo": "{userId}",  // only when user_scoped:true
+    "isDeleted": false,
+    "status": "completed"      // only when status_filter is set
+  })
+
+  // P1b — aggregate with time filter (createdAt this month)
+  db.entities.aggregate([
+    { "$match": { "type":"inspection","tenantId":"{tenantId}","isDeleted":false }},
+    { "$match": { "$expr": { "$and": [
+      { "$gte": ["$createdAt",{ "$dateTrunc":{"date":"{NOW}","unit":"month"} }] },
+      { "$lt":  ["$createdAt",{ "$dateAdd":{"startDate":
+          { "$dateTrunc":{"date":"{NOW}","unit":"month"} },"unit":"month","amount":1} }] }
+    ]}}},
+    { "$project": { "_id":1,"type":1,"title":1,"status":1,"assignedTo":1,"scheduleDate":1,"createdAt":1 }}
+  ])
+
+  ## P2 — Schedule / overdue queries
+  Root: inspection. Time field: scheduleDate.
+  Overdue: scheduleDate < {NOW} AND status != "completed"
+
+  // P2a — overdue inspections
+  db.entities.aggregate([
+    { "$match": { "type":"inspection","tenantId":"{tenantId}","isDeleted":false }},
+    { "$match": { "$expr": { "$and": [
+        { "$lt": ["$scheduleDate","{NOW}"] },
+        { "$ne": ["$status","completed"] }
+    ]}}},
+    { "$project": { "_id":1,"type":1,"title":1,"status":1,"assignedTo":1,"scheduleDate":1 }}
+  ])
+
+  // P2b — due this week
+  db.entities.aggregate([
+    { "$match": { "type":"inspection","tenantId":"{tenantId}","isDeleted":false }},
+    { "$match": { "$expr": { "$and": [
+        { "$gte": ["$scheduleDate",{ "$dateTrunc":{"date":"{NOW}","unit":"week"} }] },
+        { "$lt":  ["$scheduleDate",{ "$dateAdd":{"startDate":
+            { "$dateTrunc":{"date":"{NOW}","unit":"week"} },"unit":"week","amount":1} }] }
+    ]}}},
+    { "$project": { "_id":1,"type":1,"title":1,"status":1,"assignedTo":1,"scheduleDate":1 }}
+  ])
+
+  ## P3 — Find by checklist name
+  Root: inspection. $lookup on checklist. Filter checklist.title.
+
+  db.entities.aggregate([
+    { "$match": { "type":"inspection","tenantId":"{tenantId}","isDeleted":false }},
+    { "$lookup": { "from":"entities","let":{"cid":"$checklistId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$cid"] },
+            { "$eq":["$type","checklist"] },
+            { "$eq":["$isDeleted",false] }
+          ]}}},
+          { "$project":{ "_id":1,"title":1 }}
+        ], "as":"checklist" }},
+    { "$unwind": { "path":"$checklist","preserveNullAndEmptyArrays":false }},
+    { "$match": { "checklist.title": { "$regex":"<name>","$options":"i" }}},
+    { "$project": { "_id":1,"type":1,"title":1,"status":1,"checklist.title":1,"createdAt":1 }}
+  ])
+
+  ## P4 — Inspection responses / answers detail
+  Root: responseHistory. Chain: responseHistory → execution → inspection.
+  DEDUP IS MANDATORY.
+
+  db.entities.aggregate([
+    { "$match": { "type":"responseHistory","tenantId":"{tenantId}","isDeleted":false }},
+    // ── MANDATORY DEDUP ──
+    { "$sort": { "updatedAt":1 }},
+    { "$group": { "_id":{"questionId":"$questionId","executionId":"$executionId"},
+        "latestDoc":{ "$last":"$$ROOT" }}},
+    { "$replaceRoot": { "newRoot":"$latestDoc" }},
+    // ── chain: join execution ──
+    { "$lookup": { "from":"entities","let":{"eid":"$executionId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$eid"] },{ "$eq":["$type","execution"] },
+            { "$eq":["$isDeleted",false] }
+          ]}}}
+        ], "as":"exec" }},
+    { "$unwind": "$exec" },
+    // ── chain: join inspection (for user scope) ──
+    { "$lookup": { "from":"entities","let":{"iid":"$exec.inspectionId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$iid"] },{ "$eq":["$type","inspection"] },
+            { "$eq":["$isDeleted",false] },
+            { "$eq":["$assignedTo","{userId}"] }  // only when user_scoped:true
+          ]}}}
+        ], "as":"insp" }},
+    { "$unwind": "$insp" },
+    { "$project": { "_id":0,"responseValue":1,"scoreValue":1,"questionId":1,
+        "insp.title":1,"createdAt":1 }}
+  ])
+
+  ## P5a — Issues ("issues" / "problems" language → task ROOT)
+  Root: task. assignedTo is direct (no chain for user scope).
+  Join taskObservation for resolution detail.
+
+  // P5a — open issues assigned to me
+  db.entities.find({
+    "type":"task","tenantId":"{tenantId}","isDeleted":false,
+    "assignedTo":"{userId}",          // only when user_scoped:true
+    "status":"yetToStart"             // only when status_filter is set
+  })
+
+  // P5a — with taskObservation join
+  db.entities.aggregate([
+    { "$match": { "type":"task","tenantId":"{tenantId}","isDeleted":false,
+        "assignedTo":"{userId}" }},
+    { "$lookup": { "from":"entities","localField":"_id","foreignField":"taskId",
+        "pipeline":[{ "$match":{ "type":"taskObservation","isDeleted":false }}],
+        "as":"observations" }},
+    { "$project": { "_id":1,"title":1,"status":1,"assignedTo":1,
+        "observations.description":1,"observations.isResolved":1,"createdAt":1 }}
+  ])
+
+  ## P5b — Observations ("observations" / "notes" / "flagged" language → inspectionObservation ROOT)
+  Root: inspectionObservation. No user field directly — chain via execution → inspection.
+
+  db.entities.aggregate([
+    { "$match": { "type":"inspectionObservation","tenantId":"{tenantId}","isDeleted":false }},
+    // optional time filter on createdAt
+    { "$lookup": { "from":"entities","let":{"eid":"$executionId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$eid"] },{ "$eq":["$type","execution"] }
+          ]}}}
+        ], "as":"exec" }},
+    { "$unwind": "$exec" },
+    { "$lookup": { "from":"entities","let":{"iid":"$exec.inspectionId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$iid"] },{ "$eq":["$type","inspection"] },
+            { "$eq":["$assignedTo","{userId}"] }  // only when user_scoped:true
+          ]}}}
+        ], "as":"insp" }},
+    { "$unwind": "$insp" },
+    { "$project": { "_id":1,"description":1,"isIssue":1,"createdAt":1,"insp.title":1 }}
+  ])
+
+  ## P6 — Most failed / lowest score analysis
+  Root: responseHistory (dedup). Chain → execution → inspection (time filter) → question (group).
+
+  db.entities.aggregate([
+    { "$match": { "type":"responseHistory","tenantId":"{tenantId}","isDeleted":false,
+        "scoreValue":{ "$ne":null },"enableScore":true }},
+    // ── MANDATORY DEDUP ──
+    { "$sort": { "updatedAt":1 }},
+    { "$group": { "_id":{"questionId":"$questionId","executionId":"$executionId"},
+        "latestDoc":{ "$last":"$$ROOT" }}},
+    { "$replaceRoot": { "newRoot":"$latestDoc" }},
+    // optional time filter on createdAt after $replaceRoot
+    { "$lookup": { "from":"entities","let":{"qid":"$questionId"},
+        "pipeline":[
+          { "$match": { "$expr":{ "$and":[
+            { "$eq":["$_id","$$qid"] },{ "$eq":["$type","question"] }
+          ]}}},
+          { "$project":{ "_id":1,"questionText":1 }}
+        ], "as":"q" }},
+    { "$unwind": "$q" },
+    { "$group": { "_id":"$questionId",
+        "questionText":{ "$first":"$q.questionText" },
+        "avgScore":{ "$avg":"$scoreValue" },
+        "count":{ "$sum":1 }}},
+    { "$sort": { "avgScore":1 }},
+    
+  ])
+
+common_mistakes: |-
+  # CRITICAL MISTAKES TO PREVENT — INSPECTION GROUP
+
+  ✗ ⚡ FIELD NAME BUG: Using "entityType" or "entity_type" instead of "type"
+       WRONG: { "$match": { "entityType": "inspection" } }   ← returns ZERO results
+       RIGHT: { "$match": { "type": "inspection" } }         ← correct
+       The discriminator field is ALWAYS "type" — never "entityType".
+
+  ✗ Starting issue queries from inspectionObservation — use task
+  ✗ Starting observation queries from task — use inspectionObservation
+  ✗ Adding assignedTo to execution $match — field does not exist on execution
+  ✗ Adding assignedTo to inspectionObservation $match — field does not exist
+  ✗ Adding assignedTo to taskObservation $match — field does not exist
+  ✗ Using scheduleDate on task — field does not exist on task
+  ✗ Filtering inspection by executionId — field does not exist on inspection
+  ✗ Counting responseHistory without the mandatory dedup block
+  ✗ Referencing $scoreValue or $responseId before $replaceRoot in dedup pipeline
+  ✗ Treating execution as one record per inspection run — it is 1 per question
+  ✗ Fetching responseValues collection — out of scope for this agent
+  ✗ Placing isResolved filter on inspectionObservation — isResolved is on taskObservation
+
+routing_contract: |-
+  # T1 → T2 ROUTING CONTRACT
+
+  T1 emits primary_group:"INSPECTION" for all inspection-domain queries.
+
+  | Field             | Values                                                              | How this agent uses it                                              |
+  |-------------------|---------------------------------------------------------------------|---------------------------------------------------------------------|
+  | primary_group     | "INSPECTION"                                                        | Confirms this agent is active.                                      |
+  | user_scoped       | true / false                                                        | true → add assignedTo:{userId} to inspection or task $match.        |
+  | time_field        | createdAt / scheduleDate / updatedAt / null                         | scheduleDate only on inspection. createdAt/updatedAt on task.       |
+  | time_window       | { kind, amount } / omit                                             | Apply using {NOW}. Omit entirely if not present.                    |
+  | status_filter     | yetToStart / inProgress / completed / null                          | Add to $match of root entity if non-null.                           |
+  | entity_hint       | inspection / responseHistory / task / inspectionObservation / report| Use as the starting $match type for the opening stage.              |
+  | query_complexity  | simple / complex                                                    | simple → prefer find(). complex → aggregate() with joins.           |

@@ -28,7 +28,7 @@ config:
 # ==============================================================================
 variables:
   required:
-    - DB         # Database name: "seyo-development"
+    - DB         # Database name: "FLATNEW"
     - NOW        # UTC ISO8601 current timestamp placeholder — use literal "{NOW}"
     - SCHEMA     # Injected from inspection_schema.md
     - tenantId   # Tenant UUID placeholder — use literal "{tenantId}"
@@ -88,7 +88,7 @@ sections:
       `{DB}` database, focused exclusively on the inspection domain.
 
       Your expertise covers:
-      - `inspections` — main inspection records
+      - `inspection` — main inspection records
       - `inspectionstatuses` — status lookup (yetToStart | inProgress | completed)
       - `checklists` — checklist templates linked to inspections
       - `executions` — inspection execution instances (per question answered)
