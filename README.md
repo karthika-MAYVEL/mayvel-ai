@@ -56,21 +56,21 @@ You can test the API using tools like `curl`, Postman, or Thunder Client. The en
 
 **Example 1: Checklist Intent**
 ```bash
-curl -X POST http://localhost:8000/api/v1/ask \
+curl -X POST http://localhost:8000/api/v1/ai/ask \
      -H "Content-Type: application/json" \
      -d '{"query": "Show me all fire safety checklists"}'
 ```
 
 **Example 2: Inspection Intent**
 ```bash
-curl -X POST http://localhost:8000/api/v1/ask \
+curl -X POST http://localhost:8000/api/v1/ai/ask \
      -H "Content-Type: application/json" \
      -d '{"query": "Find me all failed inspections from last week"}'
 ```
 
 **Example 3: Sequential Intent (Complex)**
 ```bash
-curl -X POST http://localhost:8000/api/v1/ask \
+curl -X POST http://localhost:8000/api/v1/ai/ask \
      -H "Content-Type: application/json" \
      -d '{"query": "Show me all inspections for the scaffolding checklist"}'
 ```

@@ -3,32 +3,27 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
 from config.settings import settings
-from db.client import DatabaseConnector
-from api.search_router import router as search_router
-from core.logger import get_app_logger
+from infrastructure.database.database import connect_db, disconnect_db
+from api.router import api_router
+from utils.logger import get_app_logger
 
 logger = get_app_logger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan events for FastAPI. Connects to and gracefully closes the MongoDB connection pool.
+    Lifespan events for FastAPI.
     """
-    # Startup
     logger.info("Initializing Ask Seyo API Gateway service...")
-    await DatabaseConnector.connect()
+    await connect_db()
     logger.info("Service initialization complete. Ready to receive requests.")
     yield
-    # Shutdown
     logger.info("Shutting down Ask Seyo API Gateway service...")
-    await DatabaseConnector.close()
+    await disconnect_db()
     logger.info("Service shutdown complete.")
 
-# Initialize the FastAPI App Service
 app = FastAPI(title="Ask Seyo API Gateway", lifespan=lifespan)
-
-# Mount the defined API routes
-app.include_router(search_router, prefix="/api/v1/ai")
+app.include_router(api_router, prefix="/api/v1/ai")
 
 if __name__ == "__main__":
     logger.info(f"Starting Ask Seyo Gateway on {settings.HOST}:{settings.PORT}...")

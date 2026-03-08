@@ -1,19 +1,22 @@
-import os
-from dotenv import load_dotenv
+from typing import Literal
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Load environment variables from .env file if it exists
-load_dotenv()
+class Settings(BaseSettings):
+    # LLM
+    LLM_API_KEY: str = ""
+    LLM_MODEL_NAME: str = "gemini-3-flash-preview"
 
-class Settings:
-    """
-    Application settings, loaded from environment variables.
-    Follows SEYO.AI engineering standards: UPPER_SNAKE_CASE.
-    """
-    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
-    LLM_MODEL_NAME: str = os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash")
-    PORT: int = int(os.getenv("PORT", "8000"))
-    HOST: str = os.getenv("HOST", "0.0.0.0")
-    MONGO_URI: str = os.getenv("MONGODB_URI", os.getenv("MONGO_URI", "mongodb://localhost:27017"))
-    MONGO_DB: str = os.getenv("MONGO_DB_NAME", os.getenv("MONGO_DB", "seyo_db"))
+    # MongoDB
+    MONGO_URI: str = "mongodb://localhost:27017"
+    MONGO_DB_NAME: str = "mayvel"
+
+    # App
+    APP_ENV: Literal["development", "staging", "production"] = "development"
+    LOG_LEVEL: str = "INFO"
+    MAX_RESULTS: int = 200
+    PORT: int = 8000
+    HOST: str = "0.0.0.0"
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
