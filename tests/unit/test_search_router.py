@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
-from api.models.search_response import SearchResponse, ResultGroup
+from presentation.models.search_response import SearchResponse, ResultGroup
 from application.services.search_service import SearchService
 from infrastructure.database.database import get_db
 

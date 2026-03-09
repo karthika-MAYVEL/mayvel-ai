@@ -11,9 +11,9 @@ from typing import Any
 from application.agents.root_agent import RootAgent
 from application.agents.agent_registry import get_group_agent
 from utils.placeholder_resolver import build_execution_context, resolve_placeholders
-from api.models.search_request import SearchRequest
-from api.models.search_response import SearchResponse, ResultGroup
-from api.models.routing_decision import RoutingDecision
+from presentation.models.search_request import SearchRequest
+from presentation.models.search_response import SearchResponse, ResultGroup
+from presentation.models.routing_decision import RoutingDecision
 from utils.logger import get_app_logger
 import infrastructure.llm_sdk.token_tracker as token_tracker
 
@@ -154,6 +154,11 @@ class SearchOrchestrator:
                 "primary_group":     primary,
                 "secondary_groups":  routing.secondary_groups,
                 "token_usage":       tokens,
+                "llm_responses": [
+                    {"stage": "T1_Router", "response": routing.model_dump() if routing else None},
+                    {"stage": f"T2_Query_Generator_{primary}", "response": template.model_dump() if 'template' in locals() else None}
+                ],
+                "executed_mongo_query": pipeline_used,
             },
         )
         

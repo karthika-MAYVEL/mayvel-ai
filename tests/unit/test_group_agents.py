@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import MagicMock
 
-from api.models.routing_decision import RoutingDecision
-from api.models.query_template import QueryTemplate
+from presentation.models.routing_decision import RoutingDecision
+from presentation.models.query_template import QueryTemplate
 from application.agents.sub_agents.inspection_agent import InspectionGroupAgent
 from application.agents.sub_agents.task_agent import TaskGroupAgent
 from application.agents.sub_agents.workflow_agent import WorkflowGroupAgent

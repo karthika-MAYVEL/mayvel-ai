@@ -4,9 +4,9 @@
 import json
 from pathlib import Path
 
-from api.models.channel_plan import ChannelPlan, ChainChannel, IndependentChannel, ScopeHints
-from api.models.routing_decision import RoutingDecision
-from api.models.search_request import SearchRequest
+from presentation.models.channel_plan import ChannelPlan, ChainChannel, IndependentChannel, ScopeHints
+from presentation.models.routing_decision import RoutingDecision
+from presentation.models.search_request import SearchRequest
 from infrastructure.llm_sdk.gemini import GeminiClient
 from utils.logger import get_app_logger
 
@@ -43,8 +43,6 @@ class RootAgent:
     """
 
     def __init__(self):
-        import yaml
-        self._prompt = yaml.safe_load(_PROMPT_PATH.read_text())
         self._llm = GeminiClient()
 
     # ------------------------------------------------------------------
@@ -69,7 +67,12 @@ class RootAgent:
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-            channel_plan = ChannelPlan.model_validate(json.loads(raw))
+            # Try to safely parse the newly required output schema if modified
+            parsed_json = json.loads(raw)
+            channel_plan = ChannelPlan.model_validate(parsed_json)
+            # Store the raw JSON loosely in case we received the new "agents" format
+            channel_plan.__dict__["_raw_json"] = parsed_json
+            
             logger.info(f"RootAgent plan: {len(channel_plan.independent)} independent, {len(channel_plan.chains)} chains")
             return channel_plan
         except Exception as e:
@@ -83,6 +86,21 @@ class RootAgent:
         hints = None
         first_entity = "inspection" # default
         
+        # Support fallback if the new "agents" schema is returned by LLM
+        raw_json = getattr(plan, "_raw_json", {})
+        if "agents" in raw_json and isinstance(raw_json["agents"], list) and len(raw_json["agents"]) > 0:
+            first_agent = raw_json["agents"][0]
+            primary_group = first_agent.get("group", "INSPECTION")
+            return RoutingDecision(
+                primary_group=primary_group,
+                secondary_groups=[a.get("group") for a in raw_json["agents"][1:]],
+                user_scoped=True, # We'll default to True if using the new loose routing
+                entity_hint=first_agent.get("problem_description"),
+                status_filter=None,
+                time_window=None,
+                query_complexity=complexity
+            )
+
         if plan.independent:
             first_entity = plan.independent[0].entity_type
             hints = plan.independent[0].scope_hints
@@ -108,6 +126,20 @@ class RootAgent:
     # ------------------------------------------------------------------
 
     def _build_system(self) -> str:
-        sections = self._prompt.get("assembly_order", [])
-        parts = [self._prompt[s] for s in sections if s in self._prompt]
+        import yaml
+        try:
+            prompt = yaml.safe_load(_PROMPT_PATH.read_text())
+        except Exception as e:
+            logger.error(f"Failed to read root agent prompt: {e}")
+            return ""
+
+        sections = prompt.get("assembly_order", [])
+        parts = []
+        for s in sections:
+            if s in prompt:
+                val = prompt[s]
+                if isinstance(val, str):
+                    parts.append(val.strip())
+                else:
+                    parts.append(yaml.dump(val, default_flow_style=False).strip())
         return "\n\n".join(parts)

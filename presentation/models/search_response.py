@@ -31,3 +31,10 @@ class SearchResponse(BaseModel):
     total_count: int = 0
     groups: List[ResultGroup] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Response(BaseModel):
+    success: bool
+    message: str
+    data: Dict[str, Any]
+    

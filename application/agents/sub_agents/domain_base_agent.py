@@ -11,8 +11,8 @@ from typing import Optional
 
 from utils.json_parser import safe_parse_json
 
-from api.models.routing_decision import RoutingDecision
-from api.models.query_template import QueryTemplate
+from presentation.models.routing_decision import RoutingDecision
+from presentation.models.query_template import QueryTemplate
 from infrastructure.llm_sdk.gemini import GeminiClient
 from utils.logger import get_app_logger
 

@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from api.models.routing_decision import RoutingDecision, TimeWindow
+from presentation.models.routing_decision import RoutingDecision, TimeWindow
 
 
 class TestRoutingDecisionValidation:
