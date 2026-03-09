@@ -7,3 +7,7 @@ __pycache__/
 htmlcov/
 .jsonl
 .json
+.sh
+.md
+.pdf
+.tests/
