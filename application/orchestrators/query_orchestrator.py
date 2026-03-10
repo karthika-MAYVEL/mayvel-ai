@@ -12,13 +12,10 @@ from presentation.models.routing_decision import RoutingDecision
 from utils.placeholder_resolver import build_execution_context, resolve_placeholders
 from utils.sanitizer import _sanitize_doc
 from utils.logger import get_app_logger
-import infrastructure.llm_sdk.token_tracker as token_tracker
-from infrastructure.database.database import db
 from config.settings import settings
+import infrastructure.llm_sdk.token_tracker as token_tracker
 
 logger = get_app_logger("orchestrator")
-
-_COLLECTION = "entities"
 
 
 class SearchOrchestrator:
@@ -53,11 +50,10 @@ class SearchOrchestrator:
                 summary="No intent could be routed.",
                 total_count=0,
                 groups=[],
-                metadata={"routing_path": "failed"},
+                metadata={"routing_path": settings.ROUTING_PATH_FAILED},
             )
 
-        database = db.client[settings.MONGO_DB_NAME] if db.client else None
-        return await self._dispatch(request, routing, database, start_ms)
+        return await self._dispatch(request, routing, db, start_ms)
 
     # ── Private ───────────────────────────────────────────────────────────────
 
@@ -107,7 +103,7 @@ class SearchOrchestrator:
                 user_id=request.userId if routing.user_scoped else None,
             )
 
-            if template.query_type == "find" and not template.pipeline and template.filter:
+            if not template.pipeline and template.filter:
                 template.pipeline = [{"$match": template.filter}]
 
             context = build_execution_context(request.tenantId, request.userId, template)
@@ -146,13 +142,13 @@ class SearchOrchestrator:
             metadata={
                 "channels_queried": channels_queried,
                 "query_time_ms": elapsed_ms,
-                "routing_path": "two_call",
+                "routing_path": settings.ROUTING_PATH_TWO_CALL,
                 "primary_group": primary,
                 "secondary_groups": routing.secondary_groups,
                 "token_usage": tokens,
                 "llm_responses": [
-                    {"stage": "T1_Router", "response": routing.model_dump()},
-                    {"stage": f"T2_Query_Generator_{primary}", "response": template.model_dump() if template else None},
+                    {"stage": settings.LLM_STAGE_T1, "response": routing.model_dump()},
+                    {"stage": f"{settings.LLM_STAGE_T2_PREFIX}{primary}", "response": template.model_dump() if template else None},
                 ],
                 "executed_mongo_query": pipeline_used,
             },
@@ -169,7 +165,7 @@ async def _run_pipeline(db: Any, pipeline: list) -> list:
     if db is None:
         logger.warning("No DB connection — returning empty results (offline mode).")
         return []
-    cursor = db[_COLLECTION].aggregate(pipeline)
+    cursor = db[settings.MONGO_COLLECTION].aggregate(pipeline)
     raw_docs = await cursor.to_list(length=None)
     return [_sanitize_doc(doc) for doc in raw_docs]
 
@@ -200,7 +196,7 @@ def _log_query_execution(
 ) -> None:
     """Appends a structured entry to the daily JSONL query tracker log."""
     try:
-        log_dir = Path("logs")
+        log_dir = Path(settings.QUERY_LOG_DIR)
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / f"query_tracker_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
         entry = {
@@ -257,7 +253,7 @@ def _log_query_plan(
         bar,
         f"{hdr}  USER QUERY    {rst}: {val}{query}{rst}",
         f"{hdr}  ENTITY TYPE   {rst}: {val}{entity}{rst}",
-        f"{hdr}  COLLECTION    {rst}: {val}{_COLLECTION}{rst}",
+        f"{hdr}  COLLECTION    {rst}: {val}{settings.MONGO_COLLECTION}{rst}",
         f"{hdr}  STAGE COUNT   {rst}: {val}{len(pipeline)}{rst}  {dim}({', '.join(stage_names)}){rst}",
     ]
 
