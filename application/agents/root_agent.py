@@ -1,9 +1,20 @@
 # agents/root_agent.py
 # Root Agent (T1): classifies a user query into a RoutingDecision.
+#
+# Flow:
+#   route(request)
+#     → _classify()        calls LLM, validates against RoutingPlan
+#     → _to_routing_decision()   maps RoutingPlan → RoutingDecision
+#
+# To add a new agent group:
+#   1. Add group name to AgentGroup Literal in routing_plan.py
+#   2. Add agent to agent_registry.py
+#   3. Add YAML section in root_agent.yaml
+#   Nothing changes in this file.
 
 from pathlib import Path
 
-from presentation.models.channel_plan import ChannelPlan
+from presentation.models.routing_plan import RoutingPlan
 from presentation.models.routing_decision import RoutingDecision
 from presentation.models.search_request import SearchRequest
 from infrastructure.llm_sdk.gemini import GeminiClient
@@ -13,33 +24,18 @@ from utils.logger import get_app_logger
 
 logger = get_app_logger("agent.root")
 
-_PROMPT_PATH = Path(__file__).parent.parent.parent / "knowledge" / "prompts" / "root_agent.yaml"
-
-# Maps granular LLM entity names → coarse domain group names.
-# TODO: remove this once ChannelPlan includes primary_group directly.
-_ENTITY_TO_GROUP: dict[str, str] = {
-    "inspection":            "INSPECTION",
-    "inspectionchecklist":   "INSPECTION",
-    "inspectionexecution":   "INSPECTION",
-    "inspectionobservation": "INSPECTION",
-    "inspectionstatus":      "INSPECTION",
-    "inspectionresponse":    "INSPECTION",
-    "inspectionscore":       "INSPECTION",
-    "task":                  "TASK",
-    "taskobservation":       "TASK",
-    "taskcompletion":        "TASK",
-    "workflow":              "WORKFLOW",
-    "workflowexecution":     "WORKFLOW",
-    "workflowtransition":    "WORKFLOW",
-    "dashboard":             "DASHBOARD",
-    "activity":              "DASHBOARD",
-}
+_PROMPT_PATH = (
+    Path(__file__).parent.parent.parent / "knowledge" / "prompts" / "root_agent.yaml"
+)
 
 
 class RootAgent:
     """
-    T1 Agent: classifies a user query into a RoutingDecision.
-    Raises explicitly on LLM or prompt failure — no silent fallbacks.
+    T1 Agent — classifies a user query into a RoutingDecision.
+
+    Validates LLM output against RoutingPlan (which mirrors the YAML
+    output schema exactly). Maps the result to a RoutingDecision for
+    the orchestrator. Raises explicitly on any failure — no silent fallbacks.
     """
 
     def __init__(self):
@@ -53,80 +49,71 @@ class RootAgent:
         Classifies the user query into a RoutingDecision.
 
         @param request: Validated SearchRequest from the API layer.
-        @returns: RoutingDecision with primary group, scope, and complexity.
-        @raises RuntimeError: If LLM unavailable, classification fails, or
-                              the plan contains no routable entity.
+        @returns:       RoutingDecision consumed by the orchestrator.
+        @raises RuntimeError: If LLM is unavailable or classification
+                              fails after one retry.
         """
         if not self._llm.client:
             raise RuntimeError("LLM client is not configured.")
 
         plan = await self._classify(request)
-        return self._to_routing_decision(plan)
+        return _to_routing_decision(plan)
 
     # ── Private ───────────────────────────────────────────────────────────────
 
-    async def _classify(self, request: SearchRequest) -> ChannelPlan:
+    async def _classify(self, request: SearchRequest) -> RoutingPlan:
         """
-        Calls the LLM and validates the response against ChannelPlan.
+        Calls the LLM and validates the response against RoutingPlan.
         Retries once with a correction prompt on validation failure.
         """
-        user_msg = f"USER QUERY: {request.query}"
         raw = self._llm.generate_json(
-            prompt=user_msg,
+            prompt=request.query,
             system_instruction=self._system_prompt,
             agent="root",
         )
 
         try:
-            return validate(raw, ChannelPlan, request.query)
+            return validate(raw, RoutingPlan, request.query)
         except ValueError as exc:
-            logger.warning(f"RootAgent classification failed (attempt 1): {exc}")
+            logger.warning(f"T1 classification failed (attempt 1): {exc}")
 
-        correction = build_correction_prompt(raw, ChannelPlan, request.query)
+        correction = build_correction_prompt(raw, RoutingPlan, request.query)
         raw_retry = self._llm.generate_json(
             prompt=correction,
             system_instruction=self._system_prompt,
             agent="root",
         )
+
         try:
-            return validate(raw_retry, ChannelPlan, request.query)
+            return validate(raw_retry, RoutingPlan, request.query)
         except ValueError as exc:
-            logger.error(f"RootAgent classification failed after retry: {exc}")
+            logger.error(f"T1 classification failed after retry: {exc}")
             raise RuntimeError(f"Failed to classify query after retry: {exc}") from exc
 
-    def _to_routing_decision(self, plan: ChannelPlan) -> RoutingDecision:
-        """
-        Maps a validated ChannelPlan to a RoutingDecision.
-        Raises if the plan contains no routable entity — never silently defaults.
-        """
-        if not plan.independent and not plan.chains:
-            raise RuntimeError(
-                "ChannelPlan contains no independent channels or chains. "
-                "LLM classification returned an empty plan."
-            )
 
-        hints = None
+# ── Pure function — no agent state needed ─────────────────────────────────────
 
-        if plan.independent:
-            entity = plan.independent[0].entity_type
-            hints = plan.independent[0].scope_hints
-        else:
-            entity = plan.chains[0].root_entity
-            hints = plan.chains[0].scope_hints
+def _to_routing_decision(plan: RoutingPlan) -> RoutingDecision:
+    """
+    Maps a validated RoutingPlan to a RoutingDecision.
 
-        primary_group = _ENTITY_TO_GROUP.get(entity.lower())
-        if not primary_group:
-            raise RuntimeError(
-                f"LLM returned unknown entity type '{entity}'. "
-                f"Add it to _ENTITY_TO_GROUP or update the classification prompt."
-            )
+    Primary agent is agents[order=1]. Secondary agents are everything after.
+    Group names come directly from the LLM — no mapping table needed.
+    """
+    # Sort by order so agents[0] is always the primary regardless of LLM list order
+    sorted_agents = sorted(plan.agents, key=lambda a: a.order)
+    primary = sorted_agents[0]
+    secondary = [a.group for a in sorted_agents[1:]]
 
-        return RoutingDecision(
-            primary_group=primary_group,
-            secondary_groups=[],
-            user_scoped=bool(hints and hints.userfield),
-            entity_hint=entity,
-            status_filter=hints.status_filter if hints else None,
-            time_window=hints.time_window if hints else None,
-            query_complexity="complex" if plan.chains else "simple",
-        )
+    return RoutingDecision(
+        primary_group=primary.group,
+        secondary_groups=secondary,
+        problem_description=primary.problem_description,
+        query_complexity=plan.query_complexity,
+        # user_scoped and filters are resolved by T2 agents
+        # from the problem_description — not the T1 agent's job
+        user_scoped=False,
+        entity_hint=None,
+        status_filter=None,
+        time_window=None,
+    )

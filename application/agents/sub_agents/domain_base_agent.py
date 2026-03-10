@@ -1,56 +1,61 @@
 # agents/sub_agents/domain_base_agent.py
-# DomainBaseAgent: Abstract base for all T2 domain group agents.
-# Loads shared_base sections + one or more group schema YAMLs per routing decision.
+# Abstract base for all T2 domain agents.
+#
+# SCALING PATTERN:
+#   To add a new domain agent (e.g. DASHBOARD):
+#     1. Create dashboard_agent.py subclassing DomainBaseAgent
+#     2. Set group_name = "DASHBOARD"
+#     3. Set _template_model = DashboardQueryTemplate
+#     4. Add YAML prompt at knowledge/prompts/sub_agents/dashboard.yaml
+#     5. Register in agent_registry.py
+#     Nothing in this file changes.
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
-
-from utils.json_parser import safe_parse_json
+from typing import Optional, Type
 
 from presentation.models.routing_decision import RoutingDecision
 from presentation.models.query_template import QueryTemplate
 from infrastructure.llm_sdk.gemini import GeminiClient
+from utils.prompt_loader import load as load_prompt
+from utils.llm_response_validator import validate, build_correction_prompt
 from utils.logger import get_app_logger
 
 logger = get_app_logger("agent.domain_base")
 
-_KNOWLEDGE_DIR = (
-    Path(__file__).parent.parent.parent.parent / "knowledge" / "prompts" / "sub_agents"
+_PROMPTS_DIR = (
+    Path(__file__).parent.parent.parent.parent
+    / "knowledge" / "prompts" / "sub_agents"
 )
-
-# Maps group name → YAML filename stem under knowledge/groups/
-_GROUP_YAML: dict[str, str] = {
-    "INSPECTION": "inspection",
-    "TASK":       "task",
-    "WORKFLOW":   "workflow",
-    "DASHBOARD":  "dashboard",
-}
 
 
 class DomainBaseAgent(ABC):
     """
-    Abstract base for all T2 domain group agents.
+    Abstract base for all T2 domain agents.
 
-    Each subclass declares `group_name` (e.g. 'SCHEDULING') and the base class:
-    - Assembles Shared Base (SB-1…SB-10) from base_query_prompt.yaml
-    - Appends group_rules + entity_schemas for the primary group
-    - Appends secondary group schemas when cross-group routing occurs
-    - Calls the LLM once and validates the QueryTemplate response
+    Each subclass must declare:
+      group_name:      str                — e.g. "INSPECTION"
+      _template_model: Type[QueryTemplate] — model to validate LLM output against
+
+    The base class handles:
+      - Prompt loading via prompt_loader (assembly_order respected)
+      - LLM call via GeminiClient
+      - Response validation via llm_response_validator
+      - One retry with correction prompt on validation failure
     """
 
-    group_name: str  # set by each concrete subclass
+    group_name: str
+    _template_model: Type[QueryTemplate] = QueryTemplate
 
     def __init__(self) -> None:
-        self._prompt_cache: dict[str, str] = {}
         self._llm = GeminiClient()
+        self._system_prompt = load_prompt(
+            _PROMPTS_DIR / f"{self.group_name.lower()}.yaml"
+        )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public ────────────────────────────────────────────────────────────────
 
     async def generate(
         self,
@@ -62,63 +67,68 @@ class DomainBaseAgent(ABC):
         """
         Generates a QueryTemplate for the given routing decision.
 
-        @param routing: T1 routing decision (primary + secondary groups).
+        @param routing:    T1 RoutingDecision (primary group, scope hints).
         @param user_query: Original natural language query from the user.
-        @param tenant_id: Tenant UUID (injected at runtime).
-        @param user_id: User UUID, or None for tenant-wide queries.
-        @returns: Validated QueryTemplate with placeholder pipeline.
-        @throws ValueError: If LLM returns an unparseable response.
+        @param tenant_id:  Tenant UUID — injected into placeholders at runtime.
+        @param user_id:    User UUID, or None for tenant-wide queries.
+        @returns:          Validated QueryTemplate with placeholder pipeline.
+        @raises RuntimeError: If LLM is unavailable or generation fails after retry.
         """
         if not self._llm.client:
-            raise RuntimeError(f"LLM client is not configured for DomainAgent[{self.group_name}].")
+            raise RuntimeError(
+                f"LLM client is not configured for DomainAgent[{self.group_name}]."
+            )
 
-        system = self._load_prompt(self.group_name)
         user_msg = self._build_user_message(routing, user_query)
+        raw = self._llm.generate_json(
+            prompt=user_msg,
+            system_instruction=self._system_prompt,
+            agent=self.group_name,
+        )
+
         try:
-            raw = self._llm.generate_json(
-                prompt=user_msg,
-                system_instruction=system,
+            template = validate(raw, self._template_model, user_query)
+        except ValueError as exc:
+            logger.warning(
+                f"DomainAgent[{self.group_name}] generation failed (attempt 1): {exc}"
+            )
+            correction = build_correction_prompt(raw, self._template_model, user_query)
+            raw_retry = self._llm.generate_json(
+                prompt=correction,
+                system_instruction=self._system_prompt,
                 agent=self.group_name,
             )
-            parsed = safe_parse_json(raw)
-            template = QueryTemplate.model_validate(parsed)
-            logger.info(
-                f"DomainAgent[{self.group_name}] generated QueryTemplate "
-                f"(type={template.entity_type})"
-            )
-            return template
-        except Exception as exc:
-            logger.error(f"DomainAgent[{self.group_name}] LLM error: {exc}.")
-            raise RuntimeError(f"Failed to generate template in DomainAgent[{self.group_name}]: {exc}") from exc
+            try:
+                template = validate(raw_retry, self._template_model, user_query)
+            except ValueError as exc2:
+                logger.error(
+                    f"DomainAgent[{self.group_name}] generation failed after retry: {exc2}"
+                )
+                raise RuntimeError(
+                    f"Failed to generate QueryTemplate for [{self.group_name}]: {exc2}"
+                ) from exc2
 
-    @abstractmethod
-    def get_group_name(self) -> str:
-        """Returns the domain group name for this agent (e.g. 'SCHEDULING')."""
-        ...
+        logger.info(
+            f"DomainAgent[{self.group_name}] generated template "
+            f"(entity={template.entity_type})"
+        )
+        return template
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _load_prompt(self, group: str) -> str:
-        """Loads and caches the YAML for a domain group."""
-        if group not in self._prompt_cache:
-            yaml_stem = _GROUP_YAML.get(group)
-            if not yaml_stem:
-                raise ValueError(f"Unknown domain group: '{group}'")
-            path = _KNOWLEDGE_DIR / f"{yaml_stem}.yaml"
-            if not path.exists():
-                raise FileNotFoundError(f"System prompt missing: {path}")
-            self._prompt_cache[group] = path.read_text(encoding="utf-8")
-        return self._prompt_cache[group]
+    # ── Private ───────────────────────────────────────────────────────────────
 
     def _build_user_message(self, routing: RoutingDecision, user_query: str) -> str:
-        """Formats the T2 user message with routing context and query."""
-        user_id_line = "yes" if routing.user_scoped else "no"
+        """
+        Formats the T2 user message with routing context.
+        problem_description is the primary instruction — it is the clean
+        intent statement generated by T1 specifically for this agent.
+        """
         return (
-            f"USER QUERY: {user_query}\n"
+            f"TASK: {routing.problem_description or user_query}\n"
+            f"ORIGINAL QUERY: {user_query}\n"
+            f"USER SCOPED: {'yes' if routing.user_scoped else 'no'}\n"
             f"ENTITY HINT: {routing.entity_hint or 'none'}\n"
             f"STATUS FILTER: {routing.status_filter or 'none'}\n"
-            f"TIME WINDOW: {routing.time_window.model_dump() if routing.time_window else 'none'}\n"
-            f"USER SCOPED: {user_id_line}\n"
+            f"TIME WINDOW: "
+            f"{routing.time_window.model_dump() if routing.time_window else 'none'}\n"
+            f"COMPLEXITY: {routing.query_complexity}\n"
         )

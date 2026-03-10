@@ -1,41 +1,41 @@
 # agents/agent_registry.py
-# Registry: maps both entity_type strings and domain group names to their agent classes.
+# Registry: maps domain group names to their T2 agent instances.
+#
+# Agents are singletons — instantiated ONCE at module load time.
+# This means prompt loading and GeminiClient init happen at startup,
+# not on every request.
+#
+# To add a new domain agent:
+#   1. Create the agent subclass
+#   2. Import it here
+#   3. Add one line to _GROUP_REGISTRY
+#   Nothing else changes.
 
 from application.agents.sub_agents.domain_base_agent import DomainBaseAgent
 from application.agents.sub_agents.inspection_agent import InspectionGroupAgent
-from application.agents.sub_agents.task_agent import TaskGroupAgent
-from application.agents.sub_agents.workflow_agent import WorkflowGroupAgent
-from application.agents.sub_agents.dashboard_agent import DashboardGroupAgent
+from utils.logger import get_app_logger
 
-# ---------------------------------------------------------------------------
-# T2 · Domain Group Registry (new two-call architecture)
-# ---------------------------------------------------------------------------
-# Current groups:
-#   TEMPLATE   — checklist · section · question · responseValues
-#   INSPECTION — full inspection lifecycle (v1.1 unified agent, replaces
-#                 SCHEDULING + EXECUTION + TASK groups from v1)
+logger = get_app_logger("agent_registry")
 
-_GROUP_REGISTRY: dict[str, type[DomainBaseAgent]] = {
-    "INSPECTION": InspectionGroupAgent,
-    "TASK": TaskGroupAgent,
-    "WORKFLOW": WorkflowGroupAgent,
-    "DASHBOARD": DashboardGroupAgent,
+# Agents instantiated once at startup — prompts loaded, LLM client ready.
+_GROUP_REGISTRY: dict[str, DomainBaseAgent] = {
+    "INSPECTION": InspectionGroupAgent(),
 }
 
 
 def get_group_agent(group_name: str) -> DomainBaseAgent:
     """
-    Instantiates and returns the T2 domain group agent for the given group name.
+    Returns the pre-instantiated T2 agent for the given group name.
 
-    @param group_name: Domain group name as returned by the T1 classifier
-                       (TEMPLATE | INSPECTION).
-    @returns: Instantiated domain group agent.
-    @throws ValueError: If no agent is registered for the group name.
+    @param group_name: Domain group as returned by T1 RootAgent.
+    @returns:          Ready-to-use DomainBaseAgent instance.
+    @raises ValueError: If no agent is registered for the group name.
     """
-    agent_class = _GROUP_REGISTRY.get(group_name)
-    if not agent_class:
-        raise ValueError(f"No group agent registered for group='{group_name}'")
-    return agent_class()
-
-
-
+    agent = _GROUP_REGISTRY.get(group_name)
+    if not agent:
+        registered = list(_GROUP_REGISTRY.keys())
+        raise ValueError(
+            f"No agent registered for group='{group_name}'. "
+            f"Registered groups: {registered}"
+        )
+    return agent

@@ -13,6 +13,8 @@ from utils.placeholder_resolver import build_execution_context, resolve_placehol
 from utils.sanitizer import _sanitize_doc
 from utils.logger import get_app_logger
 import infrastructure.llm_sdk.token_tracker as token_tracker
+from infrastructure.database.database import db
+from config.settings import settings
 
 logger = get_app_logger("orchestrator")
 
@@ -54,7 +56,8 @@ class SearchOrchestrator:
                 metadata={"routing_path": "failed"},
             )
 
-        return await self._dispatch(request, routing, db, start_ms)
+        database = db.client[settings.MONGO_DB_NAME] if db.client else None
+        return await self._dispatch(request, routing, database, start_ms)
 
     # ── Private ───────────────────────────────────────────────────────────────
 

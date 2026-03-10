@@ -11,3 +11,4 @@ htmlcov/
 .md
 .pdf
 .tests/
+.logs/

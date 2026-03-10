@@ -1,60 +1,114 @@
-# models/query_template.py
-# Pydantic models for Sub-Agent output — QueryTemplate and nested TimeWindow.
+# presentation/models/query_template.py
+#
+# QueryTemplate  — validated output from a T2 domain agent (LLM response).
+# InspectionQueryTemplate — inspection-specific extension.
+#
+# DESIGN RULES:
+#   - This model represents ONLY what the LLM returns.
+#   - Runtime values (database, collection, resolved pipeline) are NEVER here.
+#   - Domain-specific fields live in subclasses, not the base model.
+#   - Adding a new domain agent = add a subclass. Base model never changes.
+#
+# SCALING PATTERN:
+#   For a new domain agent (e.g. DASHBOARD):
+#     class DashboardQueryTemplate(QueryTemplate):
+#         breakdown_field: Optional[str] = None
+#         aggregation_type: Literal["count", "sum", "avg"] = "count"
 
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
 from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, model_validator
 
+
+# ── Time window ───────────────────────────────────────────────────────────────
 
 class TimeWindow(BaseModel):
     """
-    Describes a relative time window used in a query.
+    Relative time window used in a query.
 
-    @param kind: Named window type
-    @param amount: Number of units (only for 'lastNDays')
+    @param kind:   Named window type.
+    @param amount: Unit count — required for 'lastNDays' and 'lastNYears'.
+                   Must be None for all other kinds.
     """
     kind: Literal[
-        "lastNDays", "today", "thisWeek", "thisMonth", "lastMonth", "YTD", 
-        "lastNYears", "thisYear", "nextNDays", "overdue"
+        "lastNDays", "today", "thisWeek", "thisMonth",
+        "lastMonth", "thisYear", "lastNYears", "nextNDays",
+        "YTD", "overdue",
     ]
-    amount: Optional[int] = None
+    amount: Optional[int] = Field(default=None, ge=1)
 
+    @model_validator(mode="after")
+    def amount_required_for_variable_kinds(self) -> TimeWindow:
+        variable_kinds = {"lastNDays", "lastNYears", "nextNDays"}
+        if self.kind in variable_kinds and self.amount is None:
+            raise ValueError(f"'amount' is required when kind='{self.kind}'")
+        if self.kind not in variable_kinds and self.amount is not None:
+            raise ValueError(f"'amount' must be None when kind='{self.kind}'")
+        return self
+
+
+# ── Base query template ───────────────────────────────────────────────────────
 
 class QueryTemplate(BaseModel):
     """
-    Output from a Sub-Agent: a MongoDB query template with placeholder strings.
-    Placeholders ({tenantId}, {userId}, {NOW}) are resolved by the assembler at runtime.
+    LLM output from a T2 domain agent.
+    Contains a MongoDB aggregation pipeline with runtime placeholders.
 
-    @param query_type: 'find' | 'aggregate'
-    @param database: Target database name
-    @param collection: Always 'entities' for the unified collection
-    @param entity_type: SEYO entity type discriminator
-    @param filter: Simple find filter (used when query_type='find')
-    @param pipeline: Aggregation pipeline stages (used when query_type='aggregate')
-    @param time_field: Which field the time_window applies to
-    @param time_window: Parsed time window description
-    @param userfield: Which field was used for user scoping
-    @param userfield_reason: Why that userfield was chosen
-    @param deduplication_applied: True when dedup pipeline stages were added (responseHistory)
-    @param scoring_applied: True when scoring logic was added (responseHistory)
-    @param scoring_mode: 'relative' | 'threshold' | None
-    @param placeholders_used: Which placeholder strings are present in the pipeline
-    @param explanation: One-line LLM reasoning
-    @param executable_pipeline: Filled by the assembler — real values substituted
+    Placeholders resolved at runtime by placeholder_resolver:
+      {tenantId}           — always required
+      {userId}             — present when user_scoped=True
+      {TIME_WINDOW_START}  — present when time_window is set
+      {TIME_WINDOW_END}    — present when time_window is set
+
+    @param entity_type:  SEYO entity type discriminator (e.g. 'inspection').
+    @param pipeline:     MongoDB aggregation pipeline with placeholder strings.
+    @param filter:       Simple find filter — only valid when query_type='find'.
+                         Converted to [{$match: filter}] by the orchestrator.
+    @param time_field:   Field the time_window applies to (e.g. 'createdAt').
+    @param time_window:  Parsed time window description.
+    @param userfield:    Field used for user scoping (e.g. 'assignedTo').
+    @param explanation:  One-line LLM reasoning for debugging.
     """
-    query_type: Literal["find", "aggregate"]
-    database: str = "FLATNEW"
-    collection: str = "entities"
+
     entity_type: str
-    filter: Dict[str, Any] = Field(default_factory=dict)
     pipeline: List[Dict[str, Any]] = Field(default_factory=list)
+    filter: Dict[str, Any] = Field(default_factory=dict)
     time_field: Optional[str] = None
     time_window: Optional[TimeWindow] = None
     userfield: Optional[str] = None
-    userfield_reason: str = ""
+    explanation: str = ""
+
+    @model_validator(mode="after")
+    def pipeline_or_filter_required(self) -> QueryTemplate:
+        """At least one of pipeline or filter must be non-empty."""
+        if not self.pipeline and not self.filter:
+            raise ValueError(
+                "QueryTemplate must contain either a non-empty 'pipeline' "
+                "or a non-empty 'filter'."
+            )
+        return self
+
+
+# ── Domain-specific extensions ────────────────────────────────────────────────
+
+class InspectionQueryTemplate(QueryTemplate):
+    """
+    Inspection-domain extension of QueryTemplate.
+    Adds fields specific to inspection scoring and response deduplication.
+
+    @param deduplication_applied: True when dedup stages were added.
+    @param scoring_applied:       True when scoring logic was added.
+    @param scoring_mode:          How scoring was computed.
+    """
     deduplication_applied: bool = False
     scoring_applied: bool = False
     scoring_mode: Optional[Literal["relative", "threshold"]] = None
-    placeholders_used: List[str] = Field(default_factory=list)
-    explanation: str = ""
-    # Runtime — filled by assembler, never by the sub-agent
-    executable_pipeline: Optional[List[Dict[str, Any]]] = None
+
+
+class WorkflowQueryTemplate(QueryTemplate):
+    """
+    Workflow-domain extension of QueryTemplate.
+    Extend with workflow-specific fields as needed.
+    """
+    pass
