@@ -49,44 +49,29 @@ class TimeWindow(BaseModel):
 
 
 # ── Base query template ───────────────────────────────────────────────────────
-
 class QueryTemplate(BaseModel):
-    """
-    LLM output from a T2 domain agent.
-    Contains a MongoDB aggregation pipeline with runtime placeholders.
-
-    Placeholders resolved at runtime by placeholder_resolver:
-      {tenantId}           — always required
-      {userId}             — present when user_scoped=True
-      {TIME_WINDOW_START}  — present when time_window is set
-      {TIME_WINDOW_END}    — present when time_window is set
-
-    @param entity_type:  SEYO entity type discriminator (e.g. 'inspection').
-    @param pipeline:     MongoDB aggregation pipeline with placeholder strings.
-    @param filter:       Simple find filter — only valid when query_type='find'.
-                         Converted to [{$match: filter}] by the orchestrator.
-    @param time_field:   Field the time_window applies to (e.g. 'createdAt').
-    @param time_window:  Parsed time window description.
-    @param userfield:    Field used for user scoping (e.g. 'assignedTo').
-    @param explanation:  One-line LLM reasoning for debugging.
-    """
 
     entity_type: str
+
+    query_type: Literal["aggregate", "find"] = "aggregate"
+
     pipeline: List[Dict[str, Any]] = Field(default_factory=list)
+
     filter: Dict[str, Any] = Field(default_factory=dict)
+
     time_field: Optional[str] = None
     time_window: Optional[TimeWindow] = None
     userfield: Optional[str] = None
     explanation: str = ""
-
     @model_validator(mode="after")
     def pipeline_or_filter_required(self) -> QueryTemplate:
         """At least one of pipeline or filter must be non-empty."""
-        if not self.pipeline and not self.filter:
-            raise ValueError(
-                "QueryTemplate must contain either a non-empty 'pipeline' "
-                "or a non-empty 'filter'."
-            )
+        if self.query_type == "aggregate" and not self.pipeline:
+            raise ValueError("Aggregate queries require a pipeline")
+
+        if self.query_type == "find" and not self.filter:
+            raise ValueError("Find queries require a filter")
+            
         return self
 
 

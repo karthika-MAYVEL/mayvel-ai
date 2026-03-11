@@ -1,54 +1,68 @@
-from typing import List, Any
-from application.orchestrators.query_orchestrator import SearchOrchestrator
-from presentation.models.search_request import SearchRequest
-from presentation.models.global_search_response import (
-    GlobalSearchResponseWrapper, 
-    GlobalSearchData, 
-    GlobalSearchMeta,
-)
+from typing import List, Dict, Any
+
 from utils.logger import get_app_logger
+from application.orchestrators.query_orchestrator import SearchOrchestrator
 
 logger = get_app_logger("search_service")
 
+
 class SearchService:
-    orchestrator =  SearchOrchestrator()
 
-    async def search(self, request: SearchRequest) -> GlobalSearchResponseWrapper:
+    def __init__(self):
+        self.orchestrator = SearchOrchestrator()
+
+    async def search(self, request) -> Dict[str, Any]:
+        """
+        Executes AI search and returns raw execution results.
+        No response models are enforced to allow dynamic projections.
+        """
+
         try:
-            # FIX: Access the orchestrator via 'self'
             response = await self.orchestrator.search(request)
-            
+
+            groups = response.groups or []
+
+            results: List[Dict[str, Any]] = []
+            for g in groups:
+                results.extend(g.items)
+
             logger.info(
-                f"[search_service] Search complete: {response.total_count} results "
-                f"across {len(response.groups)} groups"
+                f"[search_service] Search complete: "
+                f"{len(results)} results across {len(groups)} groups"
             )
 
-            # Flatten nested group items into a single list
-            # Ensure 'item' matches the GlobalSearchItem schema requirements
-            flattened_items = [
-                item for group in response.groups for item in group.items
-            ]
+            meta = {
+                "summary": response.summary,
+                "groups": len(groups),
+                "routing": {
+                    "primary_group": response.metadata.get("primary_group"),
+                    "secondary_groups": response.metadata.get("secondary_groups"),
+                    "routing_path": response.metadata.get("routing_path")
+                },
+                "token_usage": response.metadata.get("token_usage"),
+                "query_time_ms": response.metadata.get("query_time_ms"),
+                "generated_queries": response.metadata.get("llm_responses"),
+                "executed_pipeline": response.metadata.get("executed_mongo_query")
+            }
 
-            # Construct the Pydantic Response Model
-            return GlobalSearchResponseWrapper(
-                success=True,
-                message=f"{response.total_count} results analyzed",
-                total_results=response.total_count,
-                data=GlobalSearchData(global_search_response=flattened_items),
-                meta=GlobalSearchMeta(
-                    llm_responses=response.metadata.get("llm_responses", []),
-                    executed_mongo_query=response.metadata.get("executed_mongo_query")
-                )
+            return {
+                "success": True,
+                "message": "Query executed successfully",
+                "data": results,
+                "meta": meta
+            }
+
+        except Exception as exc:
+            logger.error(
+                f"[search_service] Search failed: {exc}",
+                exc_info=True
             )
 
-        except Exception as e:
-            logger.error(f"[search_service] Search failed: {e}", exc_info=True)
-            
-            # Return a valid failure response using the model wrapper
-            return GlobalSearchResponseWrapper(
-                success=False,
-                message="Search failed",
-                total_results=0,
-                data=GlobalSearchData(global_search_response=[]),
-                meta=GlobalSearchMeta(llm_responses=[], executed_mongo_query=None)
-            )
+            return {
+                "success": False,
+                "message": "Search execution failed",
+                "data": [],
+                "meta": {
+                    "error": str(exc)
+                }
+            }

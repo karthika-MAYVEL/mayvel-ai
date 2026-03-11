@@ -9,12 +9,6 @@ class SearchRequest(BaseModel):
     """
     Search request payload from the end-user.
 
-    @param query: Natural language query
-    @param tenantId: Tenant UUID for multi-tenant isolation
-    @param userId: User UUID for user-scoped queries
-    # @param limit: Maximum number of results (1–200)
-    # @param time_zone: IANA time zone string, used to interpret relative time expressions
-    # @param filters: Optional pre-filters applied before the LLM pipeline
     """
     query: str = Field(..., description="Natural language query from the user")
     tenantId: str = Field("", description="Tenant UUID for multi-tenant isolation")

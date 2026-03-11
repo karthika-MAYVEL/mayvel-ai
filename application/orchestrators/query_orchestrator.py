@@ -1,47 +1,52 @@
+# core/orchestrator.py
+# Orchestrator: coordinates the full search pipeline using RootAgent + sub-agents.
+# Supports both the new two-call T1→T2 path (RoutingDecision) and the
+# legacy ChannelPlan path for backward-compat during Stage B→C migration.
+
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from application.agents.root_agent import RootAgent
 from application.agents.agent_registry import get_group_agent
+from utils.placeholder_resolver import build_execution_context, resolve_placeholders
 from presentation.models.search_request import SearchRequest
 from presentation.models.search_response import SearchResponse, ResultGroup
 from presentation.models.routing_decision import RoutingDecision
-from utils.placeholder_resolver import build_execution_context, resolve_placeholders
-from utils.sanitizer import _sanitize_doc
 from utils.logger import get_app_logger
-from config.settings import settings
 import infrastructure.llm_sdk.token_tracker as token_tracker
+from infrastructure.database.database import get_database
 
 logger = get_app_logger("orchestrator")
+
+_COLLECTION = "entities"
+# _MAX_RESULTS = 200
 
 
 class SearchOrchestrator:
     """
     Full pipeline coordinator.
-
-    1. RootAgent (T1)  — classifies the query into a RoutingDecision.
-    2. GroupAgent (T2) — generates a QueryTemplate with a MongoDB pipeline.
-    3. Resolver        — substitutes placeholders with runtime context.
-    4. Executor        — runs the pipeline against MongoDB.
-    5. Builder         — assembles and returns a SearchResponse.
+    1. Root Agent classifies the query into a ChannelPlan.
+    2. Each channel gets its sub-agent; sub-agent returns a QueryTemplate.
+    3. Assembler resolves placeholders → executable pipeline.
+    4. Executor runs the pipeline against MongoDB.
+    5. Results are merged into a SearchResponse.
     """
 
     def __init__(self):
         self._root_agent = RootAgent()
 
-    async def search(self, request: SearchRequest) -> SearchResponse:
+    async def search(self, request: SearchRequest, db=None) -> SearchResponse:
         """
         End-to-end search execution.
 
-        @param request: Validated SearchRequest from the API layer.
-        @param db:      Live Motor database instance.
-        @returns:       Structured SearchResponse.
+        @param request: The validated SearchRequest from the API layer.
+        @param db: Live Motor database instance (None = mock/no-DB mode).
+        @returns: A structured SearchResponse.
         """
         start_ms = int(time.monotonic() * 1000)
-        token_tracker.reset()
+        token_tracker.reset()  # fresh counter for this request
         logger.info(f"Orchestrator search start: '{request.query[:80]}'")
 
         routing = await self._route(request)
@@ -50,25 +55,28 @@ class SearchOrchestrator:
                 summary="No intent could be routed.",
                 total_count=0,
                 groups=[],
-                metadata={"routing_path": settings.ROUTING_PATH_FAILED},
+                metadata={"routing_path": "failed"}
             )
 
+        db = get_database()
         return await self._dispatch(request, routing, db, start_ms)
 
-    # ── Private ───────────────────────────────────────────────────────────────
-
-    async def _route(self, request: SearchRequest) -> RoutingDecision | None:
-        """Calls T1 RootAgent to classify the query into a RoutingDecision."""
+    async def _route(
+        self, request: SearchRequest
+    ) -> RoutingDecision | None:
+        """
+        Obtains a RoutingDecision from the root agent.
+        """
         try:
             routing = await self._root_agent.route(request)
             logger.info(
-                f"T1 routing: primary={routing.primary_group} "
+                f"T1 RoutingDecision: primary={routing.primary_group} "
                 f"secondary={routing.secondary_groups} "
                 f"user_scoped={routing.user_scoped}"
             )
             return routing
         except Exception as exc:
-            logger.warning(f"T1 routing failed: {exc}")
+            logger.warning(f"T1 routing failed ({exc}).")
             return None
 
     async def _dispatch(
@@ -79,21 +87,20 @@ class SearchOrchestrator:
         start_ms: int,
     ) -> SearchResponse:
         """
-        T2 dispatch: generates a QueryTemplate, resolves placeholders,
-        executes the pipeline, and builds the SearchResponse.
+        Executes the new two-call path: T1 (already done) + one T2 call.
+        Handles primary and all secondary groups in a single T2 LLM call.
 
-        @param request:   Validated SearchRequest.
-        @param routing:   RoutingDecision from T1.
-        @param db:        MongoDB database instance.
-        @param start_ms:  Request start time in milliseconds.
-        @returns:         Structured SearchResponse.
+        @param request: The validated SearchRequest.
+        @param routing: RoutingDecision from T1.
+        @param db: MongoDB database instance.
+        @param start_ms: Request start time in milliseconds.
+        @returns: Structured SearchResponse.
         """
         primary = routing.primary_group
         agent = get_group_agent(primary)
         groups: list[ResultGroup] = []
         channels_queried: list[str] = []
         pipeline_used: list = []
-        template = None
 
         try:
             template = await agent.generate(
@@ -102,31 +109,34 @@ class SearchOrchestrator:
                 tenant_id=request.tenantId,
                 user_id=request.userId if routing.user_scoped else None,
             )
-
-            if not template.pipeline and template.filter:
+            
+            if template.query_type == "find" and not template.pipeline and template.filter:
                 template.pipeline = [{"$match": template.filter}]
-
-            context = build_execution_context(request.tenantId, request.userId, template)
+                
+            context = build_execution_context(request.tenantId, getattr(request, 'userId', None), template)
             pipeline = resolve_placeholders(template.pipeline, context)
             pipeline_used = pipeline
-
+            # pipeline = _apply_limit(pipeline)
             _log_query_plan(
-                label=f"T2 [{primary}]",
+                label=f"TWO-CALL T2 [{primary}]",
                 query=request.query,
                 entity=template.entity_type or primary.lower(),
                 pipeline=pipeline,
                 routing=routing,
             )
-
+            
+            import json
+            logger.info(f"BEFORE EXECUTION - DB Pipeline: {json.dumps(pipeline, default=str)}")
             items = await _run_pipeline(db, pipeline)
-            logger.info(f"T2 [{primary}]: pipeline returned {len(items)} documents")
-
+            logger.info(f"AFTER EXECUTION - Raw DB Query: {json.dumps(pipeline, default=str)}")
+            logger.info(f"Raw DB Items Returned ({len(items)}): {json.dumps(items, default=str)}")
+            
             entity = template.entity_type or primary.lower()
             groups.append(ResultGroup(entity_type=entity, count=len(items), items=items))
             channels_queried.append(entity)
-
+            logger.info(f"Two-call T2[{primary}]: {len(items)} results")
         except Exception as exc:
-            logger.error(f"T2 [{primary}] failed: {exc}", exc_info=True)
+            logger.error(f"Two-call T2[{primary}] failed: {exc}")
             groups.append(ResultGroup(entity_type=primary.lower(), count=0, items=[]))
 
         total = sum(g.count for g in groups)
@@ -135,90 +145,88 @@ class SearchOrchestrator:
 
         _log_token_summary(request.query, tokens, elapsed_ms)
 
-        response = SearchResponse(
+        resp = SearchResponse(
             summary=_build_summary(total, channels_queried, request.query),
             total_count=total,
             groups=groups,
             metadata={
-                "channels_queried": channels_queried,
-                "query_time_ms": elapsed_ms,
-                "routing_path": settings.ROUTING_PATH_TWO_CALL,
-                "primary_group": primary,
-                "secondary_groups": routing.secondary_groups,
-                "token_usage": tokens,
+                "channels_queried":  channels_queried,
+                "query_time_ms":     elapsed_ms,
+                "routing_path":      "two_call",
+                "primary_group":     primary,
+                "secondary_groups":  routing.secondary_groups,
+                "token_usage":       tokens,
                 "llm_responses": [
-                    {"stage": settings.LLM_STAGE_T1, "response": routing.model_dump()},
-                    {"stage": f"{settings.LLM_STAGE_T2_PREFIX}{primary}", "response": template.model_dump() if template else None},
+                    {"stage": "T1_Router", "response": routing.model_dump() if routing else None},
+                    {"stage": f"T2_Query_Generator_{primary}", "response": template.model_dump() if 'template' in locals() else None}
                 ],
                 "executed_mongo_query": pipeline_used,
             },
         )
+        
+        _log_query_execution(request, pipeline_used, resp, elapsed_ms)
+        
+        return resp
 
-        _log_query_execution(request, pipeline_used, response, elapsed_ms)
-        return response
+
+
+    # Kept for backward-compat with SearchService until it is updated
+    async def execute_search(self, user_query: str, db=None, executor=None) -> dict:
+        """Legacy shim — wraps search() for the existing SearchService."""
+        request = SearchRequest(query=user_query, tenantId="", userId="")
+        response = await self.search(request, db=db)
+        return response.model_dump()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _run_pipeline(db: Any, pipeline: list) -> list:
-    """Executes a MongoDB aggregation pipeline. Returns [] in offline mode."""
-    if db is None:
-        logger.warning("No DB connection — returning empty results (offline mode).")
-        return []
-    cursor = db[settings.MONGO_COLLECTION].aggregate(pipeline)
-    raw_docs = await cursor.to_list(length=None)
-    return [_sanitize_doc(doc) for doc in raw_docs]
-
-
-def _build_summary(total: int, channels: list[str], query: str) -> str:
-    if total == 0:
-        return f"No results found for: {query}"
-    return f"Found {total} result(s) across {', '.join(channels) or 'unknown'}."
-
-
 def _log_token_summary(query: str, tokens: dict, elapsed_ms: int) -> None:
     """Emits a structured token-usage log line for monitoring."""
     logger.info(
-        f"[TOKEN SUMMARY] query='{query[:60]}' | "
+        f"[REQUEST TOKEN SUMMARY] query='{query[:60]}' | "
         f"llm_calls={tokens['llm_calls']} | "
-        f"prompt={tokens['prompt_tokens']} | "
-        f"output={tokens['output_tokens']} | "
-        f"total={tokens['total_tokens']} | "
-        f"elapsed_ms={elapsed_ms}"
+        f"prompt_tokens={tokens['prompt_tokens']} | "
+        f"output_tokens={tokens['output_tokens']} | "
+        f"total_tokens={tokens['total_tokens']} | "
+        f"query_time_ms={elapsed_ms}"
     )
 
-
-def _log_query_execution(
-    request: SearchRequest,
-    pipeline: list,
-    response: SearchResponse,
-    elapsed_ms: int,
-) -> None:
-    """Appends a structured entry to the daily JSONL query tracker log."""
+def _log_query_execution(request: SearchRequest, pipeline: list, response: SearchResponse, elapsed_ms: int) -> None:
+    """Logs the user query, generated pipeline, and response to a tracking file."""
     try:
-        log_dir = Path(settings.QUERY_LOG_DIR)
+        from pathlib import Path
+        
+        log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
-        log_file = log_dir / f"query_tracker_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_file = log_dir / f"query_tracker_{today}.jsonl"
+        
+        # We need a custom encoder or we can dump models to dict
         entry = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "elapsed_ms": elapsed_ms,
             "request": request.model_dump(),
             "pipeline": pipeline,
-            "response": response.model_dump(),
+            "response": response.model_dump()
         }
+        
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception as exc:
         logger.error(f"Failed to write query tracker log: {exc}")
 
 
-# ── Terminal query plan printer ───────────────────────────────────────────────
-
+# ANSI colour codes for highlighted terminal output
 _ANSI = {
-    "reset":   "\033[0m",  "bold":    "\033[1m",
-    "cyan":    "\033[96m", "yellow":  "\033[93m",
-    "green":   "\033[92m", "blue":    "\033[94m",
-    "magenta": "\033[95m", "dim":     "\033[2m",
+    "reset":  "\033[0m",
+    "bold":   "\033[1m",
+    "cyan":   "\033[96m",
+    "yellow": "\033[93m",
+    "green":  "\033[92m",
+    "blue":   "\033[94m",
+    "magenta":"\033[95m",
+    "dim":    "\033[2m",
+    "red":    "\033[91m",
 }
 
 
@@ -227,37 +235,42 @@ def _log_query_plan(
     query: str,
     entity: str,
     pipeline: list,
-    routing: RoutingDecision | None = None,
+    routing=None,
 ) -> None:
     """
-    Prints a colour-coded query plan to stdout before pipeline execution.
+    Prints a richly highlighted query plan to stdout before the pipeline executes.
+    Each section is colour-coded for easy scanning in the terminal.
 
-    @param label:    Execution path label (e.g. 'T2 [INSPECTION]').
+    @param label:    Short label identifying the execution path (e.g. 'TWO-CALL T2 [INSPECTION]').
     @param query:    Original user query string.
     @param entity:   Entity type the query targets.
-    @param pipeline: Resolved MongoDB aggregation pipeline.
-    @param routing:  Optional RoutingDecision for additional context.
+    @param pipeline: Resolved MongoDB aggregation pipeline list.
+    @param routing:  Optional RoutingDecision for extra T2-path context.
     """
     C = _ANSI
-    bar = f"{C['cyan']}{C['bold']}{'═' * 72}{C['reset']}"
-    hdr = f"{C['yellow']}{C['bold']}"
-    val = C['green']
-    dim = C['dim']
-    rst = C['reset']
+    bar  = f"{C['cyan']}{C['bold']}{'═' * 72}{C['reset']}"
+    hdr  = f"{C['yellow']}{C['bold']}"
+    val  = f"{C['green']}"
+    dim  = f"{C['dim']}"
+    rst  = C['reset']
 
-    stage_names = [list(s.keys())[0] if isinstance(s, dict) else "?" for s in pipeline]
+    stage_names = [
+        list(stage.keys())[0] if isinstance(stage, dict) else "?"
+        for stage in pipeline
+    ]
 
     lines = [
-        "", bar,
+        "",
+        bar,
         f"{C['magenta']}{C['bold']}  ▶  PRE-EXECUTION QUERY PLAN  ·  {label}{rst}",
         bar,
         f"{hdr}  USER QUERY    {rst}: {val}{query}{rst}",
         f"{hdr}  ENTITY TYPE   {rst}: {val}{entity}{rst}",
-        f"{hdr}  COLLECTION    {rst}: {val}{settings.MONGO_COLLECTION}{rst}",
+        f"{hdr}  COLLECTION    {rst}: {val}{_COLLECTION}{rst}",
         f"{hdr}  STAGE COUNT   {rst}: {val}{len(pipeline)}{rst}  {dim}({', '.join(stage_names)}){rst}",
     ]
 
-    if routing:
+    if routing is not None:
         lines += [
             f"{hdr}  PRIMARY GROUP {rst}: {val}{routing.primary_group}{rst}",
             f"{hdr}  USER SCOPED   {rst}: {val}{routing.user_scoped}{rst}",
@@ -267,9 +280,56 @@ def _log_query_plan(
             f"{hdr}  COMPLEXITY    {rst}: {val}{routing.query_complexity}{rst}",
         ]
 
-    lines.append(f"{C['blue']}{C['bold']}  PIPELINE:{rst}")
-    for line in json.dumps(pipeline, indent=2, default=str).splitlines():
+    lines += [
+        f"{C['blue']}{C['bold']}  PIPELINE:{rst}",
+    ]
+    pipeline_json = json.dumps(pipeline, indent=2, default=str)
+    for line in pipeline_json.splitlines():
         lines.append(f"  {dim}{line}{rst}")
-    lines += [bar, ""]
+
+    lines.append(bar)
+    lines.append("")
 
     print("\n".join(lines), flush=True)
+
+# def _apply_limit(pipeline: list, limit: int) -> list:
+#     """Injects a $limit stage if none is present."""
+#     has_limit = any("$limit" in stage for stage in pipeline)
+#     if not has_limit:
+#         return [*pipeline, {"$limit": min(limit, _MAX_RESULTS)}]
+#     return pipeline
+
+
+async def _run_pipeline(db: Any, pipeline: list) -> list:
+    """
+    Executes a MongoDB aggregation pipeline and returns sanitized documents.
+    """
+
+    from utils.sanitizer import _sanitize_doc
+
+    if db is None:
+        logger.warning("No DB connection — returning empty results (offline mode).")
+        return []
+
+    try:
+        cursor = db[_COLLECTION].aggregate(pipeline)
+
+        # IMPORTANT: Motor requires a length argument
+        raw_docs = await cursor.to_list(length=None)
+
+        sanitized = []
+        for doc in raw_docs:
+            sanitized.append(_sanitize_doc(doc))
+
+        return sanitized
+
+    except Exception as exc:
+        logger.error(f"Mongo pipeline execution failed: {exc}", exc_info=True)
+        raise
+
+
+def _build_summary(total: int, channels: list[str], query: str) -> str:
+    if total == 0:
+        return f"No results found for: {query}"
+    channel_str = ", ".join(channels) if channels else "unknown"
+    return f"Found {total} result(s) across {channel_str}."
