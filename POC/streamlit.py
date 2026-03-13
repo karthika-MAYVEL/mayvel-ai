@@ -41,7 +41,7 @@ DEFAULT_API = "http://localhost:8005/api/v1/ai/ask"
 left, right = st.columns([1,3])
 
 # ---------------------------
-# LEFT PANEL (PROFILE SWITCH)
+# LEFT PANEL
 # ---------------------------
 
 with left:
@@ -67,15 +67,9 @@ with left:
 # RIGHT PANEL
 # ---------------------------
 
-tab_query, tab_result = right.tabs(["Query","Results"])
+with right:
 
-# ---------------------------
-# QUERY TAB
-# ---------------------------
-
-with tab_query:
-
-    st.subheader("Ask AI")
+    st.title("Seyo AI Query")
 
     question = st.text_input(
         "Query",
@@ -93,63 +87,44 @@ with tab_query:
         }
 
         try:
-
             response = requests.post(api_url, json=payload).json()
-
             st.session_state["response"] = response
-
         except Exception as e:
-
             st.error(str(e))
 
-# ---------------------------
-# RESULT TAB
-# ---------------------------
+    st.markdown("---")
 
-with tab_result:
+    # ---------------------------
+    # RESULTS (same page)
+    # ---------------------------
 
-    if "response" not in st.session_state:
-
-        st.info("Run a query to see results")
-
-    else:
+    if "response" in st.session_state:
 
         response = st.session_state["response"]
 
-        # ---------------------------
-        # DATA RENDER
-        # ---------------------------
-
         data = response.get("data")
+
+        st.subheader("Results")
 
         if data:
 
-            st.subheader("Results")
-
             if isinstance(data, list):
-
                 st.dataframe(data)
-
             else:
-
                 st.json(data)
 
         else:
-
             st.warning("No results returned")
 
         # ---------------------------
-        # METADATA (HIDDEN)
+        # METADATA
         # ---------------------------
 
         meta = response.get("meta")
 
-        with st.expander("Developer Metadata", expanded=False):
+        with st.expander("Developer Metadata"):
 
             if meta:
-
                 st.json(meta)
-
             else:
-
                 st.write("No metadata available")

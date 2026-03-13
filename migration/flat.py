@@ -1,26 +1,23 @@
 """
 FLAT SCHEMA BUILDER v3 — seyo-development  →  seyo-flat-claude
 ===============================================================
-All field names validated against live DB scan (validation.py output).
+NATIVE TYPES EDITION — all fields stored with the SAME data type
+as the source MongoDB document (ObjectId stays ObjectId, datetime
+stays datetime, numbers stay numbers, booleans stay booleans).
 
-FIXES vs v2:
-  questions       sectionId now falls back to native source field (q.get("sectionId"))
-                  — q_to_section map only covers ~882 of 10925; source has sectionId natively
-  inspections     Added: workflowId, assignedToId (was missing), geoLocation, localInspectionId,
-                  referenceId, referenceName, executionTimings
-  tasks           Added: geoLocation, referenceId, referenceName, deletedAt
-  executions      Added: geoLocation
-  responsehistories  Added: scoreValue, minScore, maxScore, enforceImage,
-                     enforceIssue, enforceObservation, responseColor
-                     (ALL exist on source responsehistories — were missed in v2)
-  inspectionobservations  Added: assignedToId+Name, geoLocation, responseId
-  taskobservations  Added: geoLocation, deletedAt
-  checklists      Added: localChecklistId
-  activities      Removed non-existent: description, tagIds
-                  Added: activeActivity, dependencyActivity
-  workflows       Fixed: statusId → workflowstatuses lookup (was plain string — WRONG)
-                  Removed non-existent: checklistIds, inspectionIds, assignedTo,
-                  tagIds, onSuccess, onFailure, description
+CHANGES vs v3 (string-casting edition):
+  _id             Stored as ObjectId  (was str)
+  all *Id fields  Stored as ObjectId  (was str)
+  tagIds          Stored as [ObjectId] (was [str])
+  responseIds     Stored as [ObjectId] (was [str])
+  checklistIds    Stored as [ObjectId] (was [str])
+  inspectionIds   Stored as [ObjectId] (was [str])
+  createdAt/updatedAt/deletedAt/reportDate  stored as datetime (was str)
+  q_to_section    Maps ObjectId → ObjectId (was str → str)
+  geo()           Returns float lat/lng as-is from source (was unchanged)
+  resolve_obj_ids Returns [ObjectId] (was [str])
+  All lookup dict keys remain str for Python dict speed; only the
+  values WRITTEN to MongoDB are now native BSON types.
 """
 
 from pymongo import MongoClient, UpdateOne
@@ -28,14 +25,14 @@ from bson import ObjectId
 from datetime import datetime
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────
-SOURCE_HOST  = "192.168.0.172"   # source: seyo-development
+SOURCE_HOST  = "192.168.0.172"
 SOURCE_PORT  = 27017
 SOURCE_DB    = "seyo-development"
 
-TARGET_HOST  = "192.168.0.130"   # target: seyo-flat-claude
+TARGET_HOST  = "192.168.0.130"
 TARGET_PORT  = 27017
-TARGET_DB    = "seyo-flat-claude"
-BATCH_SIZE   = 500
+TARGET_DB    = "seyo-flat-claude-v4"
+BATCH_SIZE   = 5_000_000
 # ───────────────────────────────────────────────────────────────────────────
 
 source_client = MongoClient(f"mongodb://{SOURCE_HOST}:{SOURCE_PORT}/", serverSelectionTimeoutMS=10000)
@@ -43,26 +40,67 @@ target_client = MongoClient(f"mongodb://{TARGET_HOST}:{TARGET_PORT}/", serverSel
 source        = source_client[SOURCE_DB]
 target        = target_client[TARGET_DB]
 
-def oid(v):
-    """Convert ObjectId or any value to string, return None for falsy."""
+
+# ── HELPER: keep ObjectId as ObjectId, return None for falsy ─────────────
+def to_oid(v):
+    """
+    Return v as an ObjectId if it isn't already, None for falsy values.
+    If v is already an ObjectId, return it unchanged.
+    If v is a 24-hex string, convert to ObjectId.
+    Otherwise return None.
+    """
+    if not v:
+        return None
+    if isinstance(v, ObjectId):
+        return v
+    s = str(v)
+    if len(s) == 24:
+        try:
+            return ObjectId(s)
+        except Exception:
+            pass
+    return None  # non-OID strings (e.g. ABP GUIDs) should NOT be cast
+
+def str_id(v):
+    """String form of an ObjectId or any value — used ONLY for Python dict keys."""
     return str(v) if v else None
 
-def ts(v):
-    """Convert datetime to ISO string."""
-    return v.isoformat() if isinstance(v, datetime) else str(v) if v else None
-
 def geo(doc):
-    """Extract geoLocation sub-document as flat fields, safely."""
+    """Extract geoLocation sub-document as flat fields with native float values."""
     g = doc.get("geoLocation") or {}
     if not isinstance(g, dict):
         return {}
     return {
-        "geoLat":     g.get("latitude"),
-        "geoLng":     g.get("longitude"),
-        "geoAddress": g.get("address"),
+        "geoLat":     g.get("latitude"),   # float or None — native
+        "geoLng":     g.get("longitude"),  # float or None — native
+        "geoAddress": g.get("address"),    # str or None
     }
 
+def resolve_obj_ids(raw_list):
+    """
+    Normalise a list that may contain ObjectIds, dicts with _id, or plain strings.
+    Returns a list of ObjectIds (not strings).
+    """
+    result = []
+    for x in (raw_list or []):
+        if not x:
+            continue
+        if isinstance(x, ObjectId):
+            result.append(x)
+        elif isinstance(x, dict):
+            oid = to_oid(x.get("_id") or x.get("id"))
+            if oid:
+                result.append(oid)
+        else:
+            oid = to_oid(x)
+            if oid:
+                result.append(oid)
+    return result
+
+
 # ── LOOKUP TABLES (load fully into memory) ────────────────────────────────
+# Keys are str(_id) for fast Python dict access.
+# Values are plain Python dicts with display strings — not stored in Mongo.
 print("📥 Loading lookup tables...")
 
 inspection_statuses = {
@@ -77,7 +115,6 @@ activity_statuses = {
     str(s["_id"]): {"displayName": s.get("displayName"), "status": s.get("status")}
     for s in source.activitystatuses.find({})
 }
-# ✅ FIX: workflowstatuses is a real collection — statusId on workflows is an ObjectId
 workflow_statuses = {
     str(s["_id"]): {"displayName": s.get("displayName"), "status": s.get("status")}
     for s in source.workflowstatuses.find({})
@@ -90,13 +127,14 @@ tags_map = {
     str(t["_id"]): t.get("displayName")
     for t in source.tags.find({})
 }
-# Users — indexed by both string id (ABP id) and _id (ObjectId)
+
+# Users — indexed by both ABP string id and MongoDB _id string
 users_map = {
     u.get("id", str(u["_id"])): {
         "name":      u.get("name"),
         "email":     u.get("email"),
         "userName":  u.get("userName"),
-        "mongoId":   str(u["_id"])
+        "mongoId":   str(u["_id"]),
     }
     for u in source.users.find({})
 }
@@ -105,221 +143,212 @@ users_by_mongoid = {
         "name":     u.get("name"),
         "email":    u.get("email"),
         "userName": u.get("userName"),
-        "id":       u.get("id")
+        "id":       u.get("id"),
     }
     for u in source.users.find({})
 }
 
-def resolve_user(user_id_str):
-    if not user_id_str: return {}
-    u = users_map.get(str(user_id_str)) or users_by_mongoid.get(str(user_id_str))
-    return u or {}
+def resolve_user(user_id_val):
+    """
+    Look up display info for a user.
+    user_id_val may be an ObjectId, a 24-hex string OID, or an ABP GUID string.
+    Returns a dict with name/email/userName (or empty dict).
+    """
+    if not user_id_val:
+        return {}
+    s = str(user_id_val)
+    return users_map.get(s) or users_by_mongoid.get(s) or {}
 
 print(f"   ✅ inspectionStatuses:{len(inspection_statuses)}  taskStatuses:{len(task_statuses)}")
 print(f"   ✅ activityStatuses:{len(activity_statuses)}  workflowStatuses:{len(workflow_statuses)}")
 print(f"   ✅ responsetypes:{len(response_types)}  tags:{len(tags_map)}  users:{len(users_map)}")
 
+
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 1 — Build section→question map from checklistmapordernumbers
-# Used as a supplement/override to the native sectionId on questions.
+# STEP 1 — Build question→section map from checklistmapordernumbers
+#
+# Map: ObjectId(questionId) → ObjectId(sectionId)
+# Also captures order numbers for questions and sections.
 # ══════════════════════════════════════════════════════════════════════════
 print("\n📐 Building question→section mapping from checklistmapordernumbers...")
 
-q_to_section  = {}   # questionId → sectionId str  (from order map)
-q_order_map   = {}   # questionId → orderNumber
-sec_order_map = {}   # sectionId  → orderNumber
+q_to_section  = {}   # ObjectId → ObjectId  (question → section)
+q_order_map   = {}   # str(questionId) → orderNumber (int/None)
+sec_order_map = {}   # str(sectionId)  → orderNumber (int/None)
 
 for doc in source.checklistmapordernumbers.find({"isDeleted": {"$ne": True}}):
     for detail in doc.get("orderDetails", []):
-        sec_id = oid(detail.get("sectionId"))
-        q_id   = oid(detail.get("questionId"))
-        order  = detail.get("orderNumber")
+        sec_oid = to_oid(detail.get("sectionId"))
+        q_oid   = to_oid(detail.get("questionId"))
+        order   = detail.get("orderNumber")
 
-        if sec_id and q_id:                         # Format C — flat legacy
-            q_to_section[q_id]    = sec_id
-            q_order_map[q_id]     = order
-            sec_order_map[sec_id] = sec_order_map.get(sec_id, order)
-        elif sec_id and not q_id:                   # Format B — section + nested questions
-            sec_order_map[sec_id] = order
+        if sec_oid and q_oid:                         # Format C — flat legacy
+            q_to_section[q_oid]           = sec_oid
+            q_order_map[str(q_oid)]       = order
+            sec_key = str(sec_oid)
+            sec_order_map.setdefault(sec_key, order)
+
+        elif sec_oid and not q_oid:                   # Format B — section + nested questions
+            sec_key = str(sec_oid)
+            sec_order_map.setdefault(sec_key, order)
             for nested in detail.get("orderDetails", []):
-                nq_id    = oid(nested.get("questionId"))
+                nq_oid   = to_oid(nested.get("questionId"))
                 nq_order = nested.get("orderNumber")
-                if nq_id:
-                    q_to_section[nq_id] = sec_id
-                    q_order_map[nq_id]  = nq_order
-        elif q_id and not sec_id:                   # Format A — standalone question
-            q_order_map[q_id] = order
+                if nq_oid:
+                    q_to_section[nq_oid]     = sec_oid
+                    q_order_map[str(nq_oid)] = nq_order
+
+        elif q_oid and not sec_oid:                   # Format A — standalone question
+            q_order_map[str(q_oid)] = order
 
 print(f"   ✅ Mapped {len(q_to_section)} questions to sections via order map")
 print(f"   ✅ Mapped {len(q_order_map)} question order numbers")
 
+
+# ── UPSERT HELPER ─────────────────────────────────────────────────────────
 def upsert_batch(collection, docs, key="_id"):
-    if not docs: return
+    if not docs:
+        return
     ops = [UpdateOne({key: d[key]}, {"$set": d}, upsert=True) for d in docs]
     collection.bulk_write(ops, ordered=False)
 
-def resolve_obj_ids(raw_list):
-    """Normalise a list that may contain ObjectIds, dicts with _id, or plain strings."""
-    result = []
-    for x in (raw_list or []):
-        if not x:
-            continue
-        if isinstance(x, dict):
-            result.append(oid(x.get("_id") or x.get("id")))
-        else:
-            result.append(oid(x))
-    return [v for v in result if v]
 
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 1 — flat_checklists
-# Source fields: title, description, version, isTemplate, isLibrary, isLatest,
-#               tenantId, createdBy, deletedBy, tagIds, isDeleted, deletedAt,
-#               localChecklistId, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_checklists...")
 batch = []
 for c in source.checklists.find({}):
-    cid       = str(c["_id"])
     tag_names = [tags_map.get(str(t)) for t in c.get("tagIds", []) if t]
-    creator   = resolve_user(c.get("createdBy", ""))
+    creator   = resolve_user(c.get("createdBy"))
     batch.append({
-        "_id":              cid,
+        "_id":              c["_id"],                          # ObjectId
         "type":             "checklists",
         "title":            c.get("title"),
         "description":      c.get("description"),
         "version":          c.get("version"),
-        "localChecklistId": c.get("localChecklistId"),  # ✅ FIX: was missing
+        "localChecklistId": c.get("localChecklistId"),
         "isTemplate":       c.get("isTemplate", False),
         "isLibrary":        c.get("isLibrary", False),
         "isLatest":         c.get("isLatest"),
         "tenantId":         c.get("tenantId"),
-        "createdById":      c.get("createdBy"),
+        "createdBy":        c.get("createdBy"),                # raw (ABP str or OID)
         "createdByName":    creator.get("name"),
         "createdByEmail":   creator.get("email"),
-        "deletedBy":        c.get("deletedBy"),
-        "tagIds":           [str(t) for t in c.get("tagIds", []) if t],
+        "deletedBy":        c.get("deletedBy"),                # raw
+        "tagIds":           [t for t in c.get("tagIds", []) if t],   # [ObjectId]
         "tagNames":         [t for t in tag_names if t],
         "isDeleted":        c.get("isDeleted", False),
-        "deletedAt":        ts(c.get("deletedAt")),
-        "createdAt":        ts(c.get("createdAt")),
-        "updatedAt":        ts(c.get("updatedAt")),
+        "deletedAt":        c.get("deletedAt"),                # datetime or None
+        "createdAt":        c.get("createdAt"),                # datetime or None
+        "updatedAt":        c.get("updatedAt"),                # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_checklists, batch); batch = []
 upsert_batch(target.flat_checklists, batch)
 print(f"   ✅ flat_checklists: {target.flat_checklists.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 2 — flat_sections
-# Source fields: checklistId, title, description, isMandatory, orderNumber,
-#               version, deletedAt, isDeleted, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_sections...")
 batch = []
 for s in source.sections.find({}):
-    sid = str(s["_id"])
+    sid = s["_id"]
     batch.append({
-        "_id":         sid,
+        "_id":         sid,                                     # ObjectId
         "type":        "sections",
-        "checklistId": oid(s.get("checklistId")),
+        "checklistId": to_oid(s.get("checklistId")),           # ObjectId
         "title":       s.get("title"),
         "description": s.get("description"),
         "isMandatory": s.get("isMandatory", False),
-        "orderNumber": sec_order_map.get(sid) or s.get("orderNumber"),
+        "orderNumber": sec_order_map.get(str(sid)) or s.get("orderNumber"),
         "version":     s.get("version"),
         "isDeleted":   s.get("isDeleted", False),
-        "deletedAt":   ts(s.get("deletedAt")),
-        "createdAt":   ts(s.get("createdAt")),
-        "updatedAt":   ts(s.get("updatedAt")),
+        "deletedAt":   s.get("deletedAt"),                     # datetime or None
+        "createdAt":   s.get("createdAt"),                     # datetime or None
+        "updatedAt":   s.get("updatedAt"),                     # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_sections, batch); batch = []
 upsert_batch(target.flat_sections, batch)
 print(f"   ✅ flat_sections: {target.flat_sections.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 3 — flat_questions
-# Source fields: checklistId, sectionId (native!), questionText, responseType,
-#               allowMultiple, isMandatory, orderNumber, version, tenantId,
-#               createdBy, deletedAt, isDeleted, createdAt, updatedAt
-# NOTE: source questions DO have sectionId natively.
-#       q_to_section map supplements/overrides where available (~882 docs).
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_questions...")
 batch = []
 for q in source.questions.find({}):
-    qid     = str(q["_id"])
-    rt      = response_types.get(oid(q.get("responseType")), {})
-    creator = resolve_user(q.get("createdBy", ""))
-    # ✅ FIX: use order-map sectionId first, fall back to native sectionId
-    resolved_section = q_to_section.get(qid) or oid(q.get("sectionId"))
+    qid     = q["_id"]                                         # ObjectId
+    rt      = response_types.get(str_id(q.get("responseType")), {})
+    creator = resolve_user(q.get("createdBy"))
+    # Use order-map sectionId first, fall back to native sectionId on question doc
+    resolved_section = q_to_section.get(qid) or to_oid(q.get("sectionId"))
     batch.append({
-        "_id":              qid,
+        "_id":              qid,                               # ObjectId
         "type":             "questions",
-        "checklistId":      oid(q.get("checklistId")),
-        "sectionId":        resolved_section,
+        "checklistId":      to_oid(q.get("checklistId")),     # ObjectId
+        "sectionId":        resolved_section,                  # ObjectId
         "questionText":     q.get("questionText"),
-        "responseTypeId":   oid(q.get("responseType")),
+        "responseTypeId":   to_oid(q.get("responseType")),    # ObjectId
         "responseTypeName": rt.get("displayName"),
         "responseTypeKey":  rt.get("type"),
-        "orderNumber":      q_order_map.get(qid) or q.get("orderNumber"),
+        "orderNumber":      q_order_map.get(str(qid)) or q.get("orderNumber"),
         "allowMultiple":    q.get("allowMultiple", False),
         "isMandatory":      q.get("isMandatory", False),
         "tenantId":         q.get("tenantId"),
-        "createdById":      q.get("createdBy"),
+        "createdBy":        q.get("createdBy"),                # raw
         "createdByName":    creator.get("name"),
         "version":          q.get("version"),
         "isDeleted":        q.get("isDeleted", False),
-        "deletedAt":        ts(q.get("deletedAt")),
-        "createdAt":        ts(q.get("createdAt")),
-        "updatedAt":        ts(q.get("updatedAt")),
+        "deletedAt":        q.get("deletedAt"),                # datetime or None
+        "createdAt":        q.get("createdAt"),                # datetime or None
+        "updatedAt":        q.get("updatedAt"),                # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_questions, batch); batch = []
 upsert_batch(target.flat_questions, batch)
 print(f"   ✅ flat_questions: {target.flat_questions.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 4 — flat_response_options
-# Source fields: questionId, responseValue, enableScore, scoreValue,
-#               enforceIssue, enforceObservation, enforceImage, responseColor,
-#               version, tenantId, createdBy, deletedAt, isDeleted, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_response_options...")
 batch = []
 for r in source.responsevalues.find({}):
-    creator = resolve_user(r.get("createdBy", ""))
+    creator = resolve_user(r.get("createdBy"))
     batch.append({
-        "_id":                str(r["_id"]),
+        "_id":                r["_id"],                        # ObjectId
         "type":               "responsevalues",
-        "questionId":         oid(r.get("questionId")),
+        "questionId":         to_oid(r.get("questionId")),    # ObjectId
         "responseValue":      r.get("responseValue"),
         "enableScore":        r.get("enableScore", False),
-        "scoreValue":         r.get("scoreValue"),
+        "scoreValue":         r.get("scoreValue"),             # numeric — native
         "enforceIssue":       r.get("enforceIssue", False),
         "enforceObservation": r.get("enforceObservation", False),
         "enforceImage":       r.get("enforceImage", False),
         "responseColor":      r.get("responseColor"),
         "version":            r.get("version"),
         "tenantId":           r.get("tenantId"),
-        "createdById":        r.get("createdBy"),
+        "createdBy":          r.get("createdBy"),              # raw
         "createdByName":      creator.get("name"),
         "isDeleted":          r.get("isDeleted", False),
-        "deletedAt":          ts(r.get("deletedAt")),
-        "createdAt":          ts(r.get("createdAt")),
-        "updatedAt":          ts(r.get("updatedAt")),
+        "deletedAt":          r.get("deletedAt"),              # datetime or None
+        "createdAt":          r.get("createdAt"),              # datetime or None
+        "updatedAt":          r.get("updatedAt"),              # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_response_options, batch); batch = []
 upsert_batch(target.flat_response_options, batch)
 print(f"   ✅ flat_response_options: {target.flat_response_options.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 5 — flat_inspections
-# Source fields: title, assignedTo, checklistId, scheduleId, workflowId,
-#               status (ObjectId→inspectionstatuses), tagIds, tenantId,
-#               createdBy, geoLocation, localInspectionId, referenceId,
-#               referenceName, executionTimings, deletedAt, isDeleted, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_inspections...")
 checklist_titles = {
@@ -328,380 +357,350 @@ checklist_titles = {
 }
 batch = []
 for i in source.inspections.find({}):
-    status_id  = oid(i.get("status"))
-    status_obj = inspection_statuses.get(status_id, {})
-    creator    = resolve_user(i.get("createdBy", ""))
-    assigned   = resolve_user(i.get("assignedTo", ""))
-    cl_id      = oid(i.get("checklistId"))
+    status_raw = i.get("status")                               # ObjectId in source
+    status_obj = inspection_statuses.get(str_id(status_raw), {})
+    creator    = resolve_user(i.get("createdBy"))
+    assigned   = resolve_user(i.get("assignedTo"))
+    cl_id      = to_oid(i.get("checklistId"))
     tag_names  = [tags_map.get(str(t)) for t in i.get("tagIds", []) if t]
     g          = geo(i)
     batch.append({
-        "_id":                str(i["_id"]),
-        "type":               "inspections",
-        "title":              i.get("title"),
-        "checklistId":        cl_id,
-        "checklistTitle":     checklist_titles.get(cl_id),
-        "scheduleId":         oid(i.get("scheduleId")),
-        "workflowId":         oid(i.get("workflowId")),      # ✅ FIX: was missing
-        "localInspectionId":  i.get("localInspectionId"),    # ✅ FIX: was missing
-        "referenceId":        i.get("referenceId"),          # ✅ FIX: was missing
-        "referenceName":      i.get("referenceName"),        # ✅ FIX: was missing
-        "executionTimings":   i.get("executionTimings"),     # ✅ FIX: was missing
-        "statusId":           status_id,
-        "statusDisplayName":  status_obj.get("displayName"),
-        "statusKey":          status_obj.get("status"),
-        "tagIds":             [str(t) for t in i.get("tagIds", []) if t],
-        "tagNames":           [t for t in tag_names if t],
-        "assignedToId":       i.get("assignedTo"),           # ✅ FIX: was missing entirely
-        "assignedToName":     assigned.get("name"),
-        "assignedToEmail":    assigned.get("email"),
-        "tenantId":           i.get("tenantId"),
-        "createdById":        i.get("createdBy"),
-        "createdByName":      creator.get("name"),
-        "createdByEmail":     creator.get("email"),
-        **g,                                                 # ✅ FIX: geoLat, geoLng, geoAddress
-        "isDeleted":          i.get("isDeleted", False),
-        "deletedAt":          ts(i.get("deletedAt")),
-        "createdAt":          ts(i.get("createdAt")),
-        "updatedAt":          ts(i.get("updatedAt")),
+        "_id":               i["_id"],                         # ObjectId
+        "type":              "inspections",
+        "title":             i.get("title"),
+        "checklistId":       cl_id,                            # ObjectId
+        "checklistTitle":    checklist_titles.get(str_id(cl_id)),
+        "scheduleId":        to_oid(i.get("scheduleId")),      # ObjectId
+        "workflowId":        to_oid(i.get("workflowId")),      # ObjectId
+        "localInspectionId": i.get("localInspectionId"),
+        "referenceId":       i.get("referenceId"),
+        "referenceName":     i.get("referenceName"),
+        "executionTimings":  i.get("executionTimings"),        # sub-doc — native
+        "statusId":          status_raw,                       # ObjectId (raw from source)
+        "statusKey":         status_obj.get("status"),
+        "tagIds":            [t for t in i.get("tagIds", []) if t],   # [ObjectId]
+        "tagNames":          [t for t in tag_names if t],
+        "assignedTo":        i.get("assignedTo"),              # raw (ABP str or OID)
+        "assignedToName":    assigned.get("name"),
+        "assignedToEmail":   assigned.get("email"),
+        "tenantId":          i.get("tenantId"),
+        "createdBy":         i.get("createdBy"),               # raw
+        "createdByName":     creator.get("name"),
+        "createdByEmail":    creator.get("email"),
+        **g,
+        "isDeleted":         i.get("isDeleted", False),
+        "deletedAt":         i.get("deletedAt"),               # datetime or None
+        "createdAt":         i.get("createdAt"),               # datetime or None
+        "updatedAt":         i.get("updatedAt"),               # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_inspections, batch); batch = []
 upsert_batch(target.flat_inspections, batch)
 print(f"   ✅ flat_inspections: {target.flat_inspections.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 6 — flat_executions
-# Source fields: inspectionId, checklistId, questionId, tenantId, createdBy,
-#               geoLocation, isDeleted, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_executions...")
 batch = []
 for e in source.executions.find({}):
-    qid     = oid(e.get("questionId"))
-    creator = resolve_user(e.get("createdBy", ""))
+    q_oid   = to_oid(e.get("questionId"))
+    creator = resolve_user(e.get("createdBy"))
     g       = geo(e)
     batch.append({
-        "_id":           str(e["_id"]),
+        "_id":           e["_id"],                             # ObjectId
         "type":          "executions",
-        "inspectionId":  oid(e.get("inspectionId")),
-        "checklistId":   oid(e.get("checklistId")),
-        "questionId":    qid,
-        "sectionId":     q_to_section.get(qid) or oid(e.get("sectionId")),
+        "inspectionId":  to_oid(e.get("inspectionId")),        # ObjectId
+        "checklistId":   to_oid(e.get("checklistId")),         # ObjectId
+        "questionId":    q_oid,                                # ObjectId
+        "sectionId":     q_to_section.get(q_oid) or to_oid(e.get("sectionId")),  # ObjectId
         "tenantId":      e.get("tenantId"),
-        "createdById":   e.get("createdBy"),
+        "createdBy":     e.get("createdBy"),                   # raw
         "createdByName": creator.get("name"),
-        **g,                                                 # ✅ FIX: geoLat, geoLng, geoAddress
+        **g,
         "isDeleted":     e.get("isDeleted", False),
-        "createdAt":     ts(e.get("createdAt")),
-        "updatedAt":     ts(e.get("updatedAt")),
+        "createdAt":     e.get("createdAt"),                   # datetime or None
+        "updatedAt":     e.get("updatedAt"),                   # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_executions, batch); batch = []
 upsert_batch(target.flat_executions, batch)
 print(f"   ✅ flat_executions: {target.flat_executions.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 7 — flat_response_histories
-# Source fields: executionId, questionId, responseIds[], responseValues[],
-#               scoreValue, minScore, maxScore, enforceImage, enforceIssue,
-#               enforceObservation, responseColor, isDeleted, createdAt, updatedAt
-# ✅ FIX: scoreValue, minScore, maxScore, enforce*, responseColor all exist on
-#         responsehistories in source — were completely missing in v2.
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_response_histories...")
 batch = []
 for rh in source.responsehistories.find({}):
-    qid = oid(rh.get("questionId"))
+    q_oid = to_oid(rh.get("questionId"))
     batch.append({
-        "_id":                  str(rh["_id"]),
-        "type":                 "responsehistories",
-        "executionId":          oid(rh.get("executionId")),
-        "questionId":           qid,
-        "sectionId":            q_to_section.get(qid) or oid(rh.get("sectionId")),
-        "responseIds":          [oid(r) for r in (rh.get("responseIds") or [])],
-        "responseValues":       rh.get("responseValues") or [],
-        # ✅ FIX: all score/enforce fields exist on responsehistories in source
-        "scoreValue":           rh.get("scoreValue"),
-        "minScore":             rh.get("minScore"),
-        "maxScore":             rh.get("maxScore"),
-        "enforceImage":         rh.get("enforceImage", False),
-        "enforceIssue":         rh.get("enforceIssue", False),
-        "enforceObservation":   rh.get("enforceObservation", False),
-        "responseColor":        rh.get("responseColor"),
-        "isDeleted":            rh.get("isDeleted", False),
-        "createdAt":            ts(rh.get("createdAt")),
-        "updatedAt":            ts(rh.get("updatedAt")),
+        "_id":                rh["_id"],                       # ObjectId
+        "type":               "responsehistories",
+        "executionId":        to_oid(rh.get("executionId")),   # ObjectId
+        "questionId":         q_oid,                           # ObjectId
+        "sectionId":          q_to_section.get(q_oid) or to_oid(rh.get("sectionId")),  # ObjectId
+        "responseIds":        [to_oid(r) for r in (rh.get("responseIds") or []) if r],  # [ObjectId]
+        "responseValues":     rh.get("responseValues") or [],  # list — native
+        "scoreValue":         rh.get("scoreValue"),            # numeric — native
+        "minScore":           rh.get("minScore"),              # numeric — native
+        "maxScore":           rh.get("maxScore"),              # numeric — native
+        "enforceImage":       rh.get("enforceImage", False),
+        "enforceIssue":       rh.get("enforceIssue", False),
+        "enforceObservation": rh.get("enforceObservation", False),
+        "responseColor":      rh.get("responseColor"),
+        "isDeleted":          rh.get("isDeleted", False),
+        "createdAt":          rh.get("createdAt"),             # datetime or None
+        "updatedAt":          rh.get("updatedAt"),             # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_response_histories, batch); batch = []
 upsert_batch(target.flat_response_histories, batch)
 print(f"   ✅ flat_response_histories: {target.flat_response_histories.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 8 — flat_tasks
-# Source fields: title, description, assignedTo, inspectionId, executionId,
-#               questionId, observationId, status (ObjectId→taskstatuses),
-#               tagIds, tenantId, createdBy, geoLocation, referenceId,
-#               referenceName, inspectionCompleted, deletedAt, isDeleted,
-#               createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_tasks...")
 batch = []
 for t in source.tasks.find({}):
-    status_id  = oid(t.get("status"))
-    status_obj = task_statuses.get(status_id, {})
-    assigned   = resolve_user(t.get("assignedTo", ""))
-    creator    = resolve_user(t.get("createdBy", ""))
-    qid        = oid(t.get("questionId"))
+    status_raw = t.get("status")                               # ObjectId in source
+    status_obj = task_statuses.get(str_id(status_raw), {})
+    assigned   = resolve_user(t.get("assignedTo"))
+    creator    = resolve_user(t.get("createdBy"))
+    q_oid      = to_oid(t.get("questionId"))
     tag_names  = [tags_map.get(str(tid)) for tid in t.get("tagIds", []) if tid]
     g          = geo(t)
     batch.append({
-        "_id":                str(t["_id"]),
+        "_id":                t["_id"],                        # ObjectId
         "type":               "tasks",
         "title":              t.get("title"),
         "description":        t.get("description"),
-        "inspectionId":       oid(t.get("inspectionId")),
-        "executionId":        oid(t.get("executionId")),
-        "questionId":         qid,
-        "sectionId":          q_to_section.get(qid) or oid(t.get("sectionId")),
-        "observationId":      oid(t.get("observationId")),
-        "statusId":           status_id,
-        "statusDisplayName":  status_obj.get("displayName"),
+        "inspectionId":       to_oid(t.get("inspectionId")),   # ObjectId
+        "executionId":        to_oid(t.get("executionId")),    # ObjectId
+        "questionId":         q_oid,                           # ObjectId
+        "sectionId":          q_to_section.get(q_oid) or to_oid(t.get("sectionId")),  # ObjectId
+        "observationId":      to_oid(t.get("observationId")),  # ObjectId
+        "statusId":           status_raw,                      # ObjectId (raw)
         "statusKey":          status_obj.get("status"),
-        "tagIds":             [str(tid) for tid in t.get("tagIds", []) if tid],
+        "tagIds":             [tid for tid in t.get("tagIds", []) if tid],  # [ObjectId]
         "tagNames":           [n for n in tag_names if n],
-        "assignedToId":       t.get("assignedTo"),
+        "assignedTo":         t.get("assignedTo"),             # raw (ABP str or OID)
         "assignedToName":     assigned.get("name"),
         "assignedToEmail":    assigned.get("email"),
-        "createdById":        t.get("createdBy"),
+        "createdBy":          t.get("createdBy"),              # raw
         "createdByName":      creator.get("name"),
         "tenantId":           t.get("tenantId"),
-        "referenceId":        t.get("referenceId"),          # ✅ FIX: was missing
-        "referenceName":      t.get("referenceName"),        # ✅ FIX: was missing
+        "referenceId":        t.get("referenceId"),
+        "referenceName":      t.get("referenceName"),
         "inspectionCompleted": t.get("inspectionCompleted", False),
-        **g,                                                 # ✅ FIX: geoLat, geoLng, geoAddress
+        **g,
         "isDeleted":          t.get("isDeleted", False),
-        "deletedAt":          ts(t.get("deletedAt")),        # ✅ FIX: was missing
-        "createdAt":          ts(t.get("createdAt")),
-        "updatedAt":          ts(t.get("updatedAt")),
+        "deletedAt":          t.get("deletedAt"),              # datetime or None
+        "createdAt":          t.get("createdAt"),              # datetime or None
+        "updatedAt":          t.get("updatedAt"),              # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_tasks, batch); batch = []
 upsert_batch(target.flat_tasks, batch)
 print(f"   ✅ flat_tasks: {target.flat_tasks.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 9 — flat_task_observations
-# Source fields: taskId, executionId, questionId, observationId, description,
-#               isIssue, isResolved, evidence, hasAttachment, attachmentCount,
-#               geoLocation, tenantId, createdBy, deletedAt, isDeleted,
-#               createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_task_observations...")
 batch = []
 for o in source.taskobservations.find({}):
-    qid     = oid(o.get("questionId"))
-    creator = resolve_user(o.get("createdBy", ""))
+    q_oid   = to_oid(o.get("questionId"))
+    creator = resolve_user(o.get("createdBy"))
     g       = geo(o)
     batch.append({
-        "_id":             str(o["_id"]),
+        "_id":             o["_id"],                           # ObjectId
         "type":            "taskobservations",
-        "taskId":          oid(o.get("taskId")),
-        "executionId":     oid(o.get("executionId")),
-        "questionId":      qid,
-        "sectionId":       q_to_section.get(qid) or oid(o.get("sectionId")),
-        "observationId":   oid(o.get("observationId")),
+        "taskId":          to_oid(o.get("taskId")),            # ObjectId
+        "executionId":     to_oid(o.get("executionId")),       # ObjectId
+        "questionId":      q_oid,                              # ObjectId
+        "sectionId":       q_to_section.get(q_oid) or to_oid(o.get("sectionId")),  # ObjectId
+        "observationId":   to_oid(o.get("observationId")),     # ObjectId
         "description":     o.get("description"),
         "isIssue":         o.get("isIssue", False),
         "isResolved":      o.get("isResolved", False),
         "evidence":        o.get("evidence"),
         "hasAttachment":   o.get("hasAttachment", False),
-        "attachmentCount": o.get("attachmentCount", 0),
-        "createdById":     o.get("createdBy"),
+        "attachmentCount": o.get("attachmentCount", 0),        # int — native
+        "createdBy":       o.get("createdBy"),                 # raw
         "createdByName":   creator.get("name"),
         "tenantId":        o.get("tenantId"),
-        **g,                                                 # ✅ FIX: geoLat, geoLng, geoAddress
+        **g,
         "isDeleted":       o.get("isDeleted", False),
-        "deletedAt":       ts(o.get("deletedAt")),          # ✅ FIX: was missing
-        "createdAt":       ts(o.get("createdAt")),
-        "updatedAt":       ts(o.get("updatedAt")),
+        "deletedAt":       o.get("deletedAt"),                 # datetime or None
+        "createdAt":       o.get("createdAt"),                 # datetime or None
+        "updatedAt":       o.get("updatedAt"),                 # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_task_observations, batch); batch = []
 upsert_batch(target.flat_task_observations, batch)
 print(f"   ✅ flat_task_observations: {target.flat_task_observations.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 10 — flat_inspection_observations
-# Source fields: executionId, questionId, assignedTo, responseId (singular),
-#               description, isIssue, evidence, hasAttachment, attachmentCount,
-#               geoLocation, tenantId, createdBy, isDeleted, createdAt, updatedAt
-# ✅ FIX: assignedTo, geoLocation, responseId all exist in source — were missing
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_inspection_observations...")
 batch = []
 for o in source.inspectionobservations.find({}):
-    qid      = oid(o.get("questionId"))
-    creator  = resolve_user(o.get("createdBy", ""))
-    assigned = resolve_user(o.get("assignedTo", ""))
+    q_oid    = to_oid(o.get("questionId"))
+    creator  = resolve_user(o.get("createdBy"))
+    assigned = resolve_user(o.get("assignedTo"))
     g        = geo(o)
     batch.append({
-        "_id":             str(o["_id"]),
+        "_id":             o["_id"],                           # ObjectId
         "type":            "inspectionobservations",
-        "executionId":     oid(o.get("executionId")),
-        "questionId":      qid,
-        "sectionId":       q_to_section.get(qid) or oid(o.get("sectionId")),
-        "responseId":      oid(o.get("responseId")),         # ✅ FIX: singular ref, was missing
-        "assignedToId":    o.get("assignedTo"),              # ✅ FIX: was missing
-        "assignedToName":  assigned.get("name"),             # ✅ FIX: was missing
+        "executionId":     to_oid(o.get("executionId")),       # ObjectId
+        "questionId":      q_oid,                              # ObjectId
+        "sectionId":       q_to_section.get(q_oid) or to_oid(o.get("sectionId")),  # ObjectId
+        "responseId":      to_oid(o.get("responseId")),        # ObjectId (singular)
+        "assignedTo":      o.get("assignedTo"),                # raw (ABP str or OID)
+        "assignedToName":  assigned.get("name"),
         "description":     o.get("description"),
         "isIssue":         o.get("isIssue", False),
         "evidence":        o.get("evidence"),
         "hasAttachment":   o.get("hasAttachment", False),
-        "attachmentCount": o.get("attachmentCount", 0),
-        "createdById":     o.get("createdBy"),
+        "attachmentCount": o.get("attachmentCount", 0),        # int — native
+        "createdBy":       o.get("createdBy"),                 # raw
         "createdByName":   creator.get("name"),
         "tenantId":        o.get("tenantId"),
-        **g,                                                 # ✅ FIX: geoLat, geoLng, geoAddress
+        **g,
         "isDeleted":       o.get("isDeleted", False),
-        "createdAt":       ts(o.get("createdAt")),
-        "updatedAt":       ts(o.get("updatedAt")),
+        "createdAt":       o.get("createdAt"),                 # datetime or None
+        "updatedAt":       o.get("updatedAt"),                 # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_inspection_observations, batch); batch = []
 upsert_batch(target.flat_inspection_observations, batch)
 print(f"   ✅ flat_inspection_observations: {target.flat_inspection_observations.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 11 — flat_reports
-# Source fields: inspectionId, reportName, reportNumber, reportDate,
-#               tenantId, isDeleted, inspectionUpdatedAt, createdAt, updatedAt
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_reports...")
 inspection_docs = {
     str(i["_id"]): {
         "title":       i.get("title"),
-        "statusId":    oid(i.get("status")),
-        "checklistId": oid(i.get("checklistId"))
+        "statusRaw":   i.get("status"),            # ObjectId
+        "checklistId": to_oid(i.get("checklistId")),
     }
     for i in source.inspections.find({}, {"title": 1, "status": 1, "checklistId": 1})
 }
 batch = []
 for r in source.reports.find({}):
-    ins_id  = oid(r.get("inspectionId"))
+    ins_id  = str_id(r.get("inspectionId"))
     ins_obj = inspection_docs.get(ins_id, {})
-    s_obj   = inspection_statuses.get(ins_obj.get("statusId"), {})
+    s_obj   = inspection_statuses.get(str_id(ins_obj.get("statusRaw")), {})
     batch.append({
-        "_id":                   str(r["_id"]),
+        "_id":                   r["_id"],                     # ObjectId
         "type":                  "reports",
         "reportName":            r.get("reportName"),
         "reportNumber":          r.get("reportNumber"),
-        "reportDate":            ts(r.get("reportDate")),
-        "inspectionId":          ins_id,
+        "reportDate":            r.get("reportDate"),          # datetime — native
+        "inspectionId":          to_oid(r.get("inspectionId")),  # ObjectId
         "inspectionTitle":       ins_obj.get("title"),
-        "inspectionChecklistId": ins_obj.get("checklistId"),
+        "inspectionChecklistId": ins_obj.get("checklistId"),   # ObjectId
         "inspectionStatusName":  s_obj.get("displayName"),
         "tenantId":              r.get("tenantId"),
         "isDeleted":             r.get("isDeleted", False),
-        "inspectionUpdatedAt":   ts(r.get("inspectionUpdatedAt")),
-        "createdAt":             ts(r.get("createdAt")),
-        "updatedAt":             ts(r.get("updatedAt")),
+        "inspectionUpdatedAt":   r.get("inspectionUpdatedAt"), # datetime — native
+        "createdAt":             r.get("createdAt"),           # datetime — native
+        "updatedAt":             r.get("updatedAt"),           # datetime — native
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_reports, batch); batch = []
 upsert_batch(target.flat_reports, batch)
 print(f"   ✅ flat_reports: {target.flat_reports.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 12 — flat_activities
-# Source fields: title, assignedTo, checklists[], inspections[], statusId,
-#               workflowId, roleId, orderNumber, onSuccess, onFailure,
-#               activeActivity, dependencyActivity, tenantId, createdBy,
-#               deletedAt, isDeleted, createdAt, updatedAt
-# ✅ FIX vs v2: removed non-existent description, tagIds
-#               added activeActivity, dependencyActivity
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_activities...")
 batch = []
 for a in source.activities.find({}):
-    status_id  = oid(a.get("statusId"))
-    status_obj = activity_statuses.get(status_id, {})
-    assigned   = resolve_user(a.get("assignedTo", ""))
-    creator    = resolve_user(a.get("createdBy", ""))
-    # checklists[] and inspections[] are ObjectId arrays or dicts
-    checklist_ids  = resolve_obj_ids(a.get("checklists", []))
-    inspection_ids = resolve_obj_ids(a.get("inspections", []))
+    status_raw = to_oid(a.get("statusId"))
+    status_obj = activity_statuses.get(str_id(status_raw), {})
+    assigned   = resolve_user(a.get("assignedTo"))
+    creator    = resolve_user(a.get("createdBy"))
+    checklist_ids  = resolve_obj_ids(a.get("checklists", []))    # [ObjectId]
+    inspection_ids = resolve_obj_ids(a.get("inspections", []))   # [ObjectId]
     batch.append({
-        "_id":                str(a["_id"]),
+        "_id":                a["_id"],                        # ObjectId
         "type":               "activities",
         "title":              a.get("title"),
         "tenantId":           a.get("tenantId"),
-        "statusId":           status_id,
-        "statusDisplayName":  status_obj.get("displayName"),
+        "statusId":           status_raw,                      # ObjectId
         "statusKey":          status_obj.get("status"),
-        "assignedToId":       a.get("assignedTo"),
+        "assignedTo":         a.get("assignedTo"),             # raw (ABP str or OID)
         "assignedToName":     assigned.get("name"),
         "assignedToEmail":    assigned.get("email"),
-        "workflowId":         oid(a.get("workflowId")),
-        "roleId":             oid(a.get("roleId")),
-        "orderNumber":        a.get("orderNumber"),
-        "checklistIds":       checklist_ids,
-        "inspectionIds":      inspection_ids,
+        "workflowId":         to_oid(a.get("workflowId")),     # ObjectId
+        "roleId":             to_oid(a.get("roleId")),         # ObjectId
+        "orderNumber":        a.get("orderNumber"),            # numeric — native
+        "checklistIds":       checklist_ids,                   # [ObjectId]
+        "inspectionIds":      inspection_ids,                  # [ObjectId]
         "onSuccess":          a.get("onSuccess"),
         "onFailure":          a.get("onFailure"),
-        "activeActivity":     a.get("activeActivity"),       # ✅ FIX: was missing
-        "dependencyActivity": a.get("dependencyActivity"),   # ✅ FIX: was missing
-        "createdById":        a.get("createdBy"),
+        "activeActivity":     a.get("activeActivity"),
+        "dependencyActivity": a.get("dependencyActivity"),
+        "createdBy":          a.get("createdBy"),              # raw
         "createdByName":      creator.get("name"),
         "createdByEmail":     creator.get("email"),
         "isDeleted":          a.get("isDeleted", False),
-        "deletedAt":          ts(a.get("deletedAt")),
-        "createdAt":          ts(a.get("createdAt")),
-        "updatedAt":          ts(a.get("updatedAt")),
+        "deletedAt":          a.get("deletedAt"),              # datetime or None
+        "createdAt":          a.get("createdAt"),              # datetime or None
+        "updatedAt":          a.get("updatedAt"),              # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_activities, batch); batch = []
 upsert_batch(target.flat_activities, batch)
 print(f"   ✅ flat_activities: {target.flat_activities.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # TABLE 13 — flat_workflows
-# Source fields: title, statusId (ObjectId→workflowstatuses!), tenantId,
-#               createdBy, deletedAt, isDeleted, createdAt, updatedAt
-# ✅ FIX vs v2: statusId is an ObjectId → workflowstatuses (NOT a plain string!)
-#               removed non-existent: assignedTo, checklistIds, inspectionIds,
-#               tagIds, onSuccess, onFailure, description
 # ══════════════════════════════════════════════════════════════════════════
 print("\n🗂  Building flat_workflows...")
 batch = []
 for w in source.workflows.find({}):
-    status_id  = oid(w.get("statusId"))                      # ✅ FIX: field is statusId
-    status_obj = workflow_statuses.get(status_id, {})        # ✅ FIX: lookup workflowstatuses
-    creator    = resolve_user(w.get("createdBy", ""))
+    status_raw = to_oid(w.get("statusId"))
+    status_obj = workflow_statuses.get(str_id(status_raw), {})
+    creator    = resolve_user(w.get("createdBy"))
     batch.append({
-        "_id":                str(w["_id"]),
-        "type":               "workflows",
-        "title":              w.get("title"),
-        "tenantId":           w.get("tenantId"),
-        "statusId":           status_id,
-        "statusDisplayName":  status_obj.get("displayName"),  # ✅ FIX: resolved from workflowstatuses
-        "statusKey":          status_obj.get("status"),       # ✅ FIX: resolved from workflowstatuses
-        "createdById":        w.get("createdBy"),
-        "createdByName":      creator.get("name"),
-        "createdByEmail":     creator.get("email"),
-        "isDeleted":          w.get("isDeleted", False),
-        "deletedAt":          ts(w.get("deletedAt")),
-        "createdAt":          ts(w.get("createdAt")),
-        "updatedAt":          ts(w.get("updatedAt")),
+        "_id":           w["_id"],                             # ObjectId
+        "type":          "workflows",
+        "title":         w.get("title"),
+        "tenantId":      w.get("tenantId"),
+        "statusId":      status_raw,                           # ObjectId
+        "statusKey":     status_obj.get("status"),
+        "createdBy":     w.get("createdBy"),                   # raw
+        "createdByName": creator.get("name"),
+        "createdByEmail": creator.get("email"),
+        "isDeleted":     w.get("isDeleted", False),
+        "deletedAt":     w.get("deletedAt"),                   # datetime or None
+        "createdAt":     w.get("createdAt"),                   # datetime or None
+        "updatedAt":     w.get("updatedAt"),                   # datetime or None
     })
     if len(batch) >= BATCH_SIZE:
         upsert_batch(target.flat_workflows, batch); batch = []
 upsert_batch(target.flat_workflows, batch)
 print(f"   ✅ flat_workflows: {target.flat_workflows.count_documents({})} docs")
 
+
 # ══════════════════════════════════════════════════════════════════════════
-# STEP FINAL — Consolidate all flat collections into ONE collection
+# FINAL — Consolidate all flat collections into flat_entities
 # ══════════════════════════════════════════════════════════════════════════
 FLAT_COLLECTIONS = [
     "flat_checklists", "flat_sections", "flat_questions",
@@ -713,7 +712,7 @@ FLAT_COLLECTIONS = [
 
 CONSOLIDATED = "flat_entities"
 
-print("\n🔀 Consolidating all flat collections → flat_entities...")
+print(f"\n🔀 Consolidating all flat collections → {CONSOLIDATED}...")
 target[CONSOLIDATED].drop()
 
 for col_name in FLAT_COLLECTIONS:
@@ -727,22 +726,24 @@ print(f"🎉 FLAT SCHEMA BUILD COMPLETE → {TARGET_HOST}/{TARGET_DB}")
 print("=" * 60)
 print(f"   {'flat_entities (consolidated)':<35} {target[CONSOLIDATED].count_documents({}):>6} docs")
 
-print("\n📋 Diagnostic checks:")
-print(f"   Questions with sectionId        : {target[CONSOLIDATED].count_documents({'type': 'questions', 'sectionId': {'$ne': None}})}")
-print(f"   Questions without sectionId     : {target[CONSOLIDATED].count_documents({'type': 'questions', 'sectionId': None})}")
-print(f"   Inspections with assignedToId   : {target[CONSOLIDATED].count_documents({'type': 'inspections', 'assignedToId': {'$ne': None}})}")
-print(f"   Inspections with workflowId     : {target[CONSOLIDATED].count_documents({'type': 'inspections', 'workflowId': {'$ne': None}})}")
-print(f"   Tasks with status resolved      : {target[CONSOLIDATED].count_documents({'type': 'tasks', 'statusDisplayName': {'$ne': None}})}")
-print(f"   Inspections with status resolved: {target[CONSOLIDATED].count_documents({'type': 'inspections', 'statusDisplayName': {'$ne': None}})}")
-print(f"   Activities with status resolved : {target[CONSOLIDATED].count_documents({'type': 'activities', 'statusDisplayName': {'$ne': None}})}")
-print(f"   Workflows with status resolved  : {target[CONSOLIDATED].count_documents({'type': 'workflows', 'statusDisplayName': {'$ne': None}})}")
-print(f"   ResponseHistories with scoreValue: {target[CONSOLIDATED].count_documents({'type': 'responsehistories', 'scoreValue': {'$ne': None}})}")
-print(f"   InspObs with assignedToId       : {target[CONSOLIDATED].count_documents({'type': 'inspectionobservations', 'assignedToId': {'$ne': None}})}")
+print("\n📋 Diagnostic checks (type-aware):")
+print(f"   Questions with sectionId (OID)      : {target[CONSOLIDATED].count_documents({'type': 'questions', 'sectionId': {'$type': 'objectId'}})}")
+print(f"   Questions without sectionId         : {target[CONSOLIDATED].count_documents({'type': 'questions', 'sectionId': None})}")
+print(f"   Inspections with assignedTo         : {target[CONSOLIDATED].count_documents({'type': 'inspections', 'assignedTo': {'$ne': None}})}")
+print(f"   Inspections with workflowId (OID)   : {target[CONSOLIDATED].count_documents({'type': 'inspections', 'workflowId': {'$type': 'objectId'}})}")
+print(f"   Inspections with statusId (OID)     : {target[CONSOLIDATED].count_documents({'type': 'inspections', 'statusId': {'$type': 'objectId'}})}")
+print(f"   Tasks with statusId (OID)           : {target[CONSOLIDATED].count_documents({'type': 'tasks', 'statusId': {'$type': 'objectId'}})}")
+print(f"   Activities with statusId (OID)      : {target[CONSOLIDATED].count_documents({'type': 'activities', 'statusId': {'$type': 'objectId'}})}")
+print(f"   Workflows with statusId (OID)       : {target[CONSOLIDATED].count_documents({'type': 'workflows', 'statusId': {'$type': 'objectId'}})}")
+print(f"   ResponseHistories with scoreValue   : {target[CONSOLIDATED].count_documents({'type': 'responsehistories', 'scoreValue': {'$ne': None}})}")
+print(f"   InspObs with assignedTo             : {target[CONSOLIDATED].count_documents({'type': 'inspectionobservations', 'assignedTo': {'$ne': None}})}")
+print(f"   Docs with datetime createdAt        : {target[CONSOLIDATED].count_documents({'createdAt': {'$type': 'date'}})}")
+print(f"   Docs with OID _id                   : {target[CONSOLIDATED].count_documents({'_id': {'$type': 'objectId'}})}")
 
 print("\n📊 Breakdown by type:")
-for type_val in ["checklists","sections","questions","responsevalues","inspections",
-                 "executions","responsehistories","tasks","taskobservations",
-                 "inspectionobservations","reports","activities","workflows"]:
+for type_val in ["checklists", "sections", "questions", "responsevalues", "inspections",
+                 "executions", "responsehistories", "tasks", "taskobservations",
+                 "inspectionobservations", "reports", "activities", "workflows"]:
     count = target[CONSOLIDATED].count_documents({"type": type_val})
     print(f"   type={type_val:<30} {count:>6} docs")
 
@@ -755,6 +756,9 @@ target[CONSOLIDATED].create_index([("type", 1), ("inspectionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("questionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("sectionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("workflowId", 1)])
-target[CONSOLIDATED].create_index([("type", 1), ("assignedToId", 1)])
+target[CONSOLIDATED].create_index([("type", 1), ("assignedTo", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("executionId", 1)])
+target[CONSOLIDATED].create_index([("type", 1), ("statusId", 1)])
+target[CONSOLIDATED].create_index([("type", 1), ("createdAt", 1)])
+target[CONSOLIDATED].create_index([("type", 1), ("updatedAt", 1)])
 print("   ✅ Indexes created")

@@ -18,7 +18,7 @@ SOURCE_DB    = "seyo-development"
 
 TARGET_HOST  = "192.168.0.130"
 TARGET_PORT  = 27017
-TARGET_DB    = "seyo-flat-claude-v2"
+TARGET_DB    = "seyo-flat-claude-v3"
 BATCH_SIZE   = 500000
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -166,7 +166,7 @@ for c in source.checklists.find({}):
         "isLibrary":        c.get("isLibrary", False),
         "isLatest":         c.get("isLatest"),
         "tenantId":         c.get("tenantId"),
-        "createdById":      c.get("createdBy"),     # ← raw value (string userId)
+        "createdBy":        c.get("createdBy"),     # ← raw value (string userId)
         "createdByName":    creator.get("name"),
         "createdByEmail":   creator.get("email"),
         "deletedBy":        c.get("deletedBy"),
@@ -231,7 +231,7 @@ for q in source.questions.find({}):
         "allowMultiple":    q.get("allowMultiple", False),
         "isMandatory":      q.get("isMandatory", False),
         "tenantId":         q.get("tenantId"),
-        "createdById":      q.get("createdBy"),
+        "createdBy":      q.get("createdBy"),
         "createdByName":    creator.get("name"),
         "version":          q.get("version"),
         "isDeleted":        q.get("isDeleted", False),
@@ -264,7 +264,7 @@ for r in source.responsevalues.find({}):
         "responseColor":      r.get("responseColor"),
         "version":            r.get("version"),
         "tenantId":           r.get("tenantId"),
-        "createdById":        r.get("createdBy"),
+        "createdBy":        r.get("createdBy"),
         "createdByName":      creator.get("name"),
         "isDeleted":          r.get("isDeleted", False),
         "deletedAt":          ts(r.get("deletedAt")),
@@ -305,15 +305,15 @@ for i in source.inspections.find({}):
         "referenceName":      i.get("referenceName"),
         "executionTimings":   i.get("executionTimings"),
         "statusId":           i.get("status"),      # ← raw ObjectId (source field is "status")
-        "statusDisplayName":  status_obj.get("displayName"),
+        # "statusDisplayName":  status_obj.get("displayName"),
         "statusKey":          status_obj.get("status"),
         "tagIds":             i.get("tagIds", []),  # ← raw ObjectId list
         "tagNames":           [t for t in tag_names if t],
-        "assignedToId":       i.get("assignedTo"),  # ← raw value
+        "assignedTo":       i.get("assignedTo"),  # ← raw value
         "assignedToName":     assigned.get("name"),
         "assignedToEmail":    assigned.get("email"),
         "tenantId":           i.get("tenantId"),
-        "createdById":        i.get("createdBy"),
+        "createdBy":        i.get("createdBy"),
         "createdByName":      creator.get("name"),
         "createdByEmail":     creator.get("email"),
         **g,
@@ -344,7 +344,7 @@ for e in source.executions.find({}):
         "questionId":    qid,                       # ← raw ObjectId
         "sectionId":     q_to_section.get(sid(qid)) or e.get("sectionId"),
         "tenantId":      e.get("tenantId"),
-        "createdById":   e.get("createdBy"),
+        "createdBy":   e.get("createdBy"),
         "createdByName": creator.get("name"),
         **g,
         "isDeleted":     e.get("isDeleted", False),
@@ -410,14 +410,14 @@ for t in source.tasks.find({}):
         "sectionId":          q_to_section.get(sid(qid)) or t.get("sectionId"),
         "observationId":      t.get("observationId"),   # ← raw ObjectId
         "statusId":           t.get("status"),          # ← raw ObjectId (source field is "status")
-        "statusDisplayName":  status_obj.get("displayName"),
+        # "statusDisplayName":  status_obj.get("displayName"),
         "statusKey":          status_obj.get("status"),
         "tagIds":             t.get("tagIds", []),      # ← raw ObjectId list
         "tagNames":           [n for n in tag_names if n],
-        "assignedToId":       t.get("assignedTo"),
+        "assignedTo":       t.get("assignedTo"),
         "assignedToName":     assigned.get("name"),
         "assignedToEmail":    assigned.get("email"),
-        "createdById":        t.get("createdBy"),
+        "createdBy":        t.get("createdBy"),
         "createdByName":      creator.get("name"),
         "tenantId":           t.get("tenantId"),
         "referenceId":        t.get("referenceId"),
@@ -457,7 +457,7 @@ for o in source.taskobservations.find({}):
         "evidence":        o.get("evidence"),
         "hasAttachment":   o.get("hasAttachment", False),
         "attachmentCount": o.get("attachmentCount", 0),
-        "createdById":     o.get("createdBy"),
+        "createdBy":     o.get("createdBy"),
         "createdByName":   creator.get("name"),
         "tenantId":        o.get("tenantId"),
         **g,
@@ -488,14 +488,14 @@ for o in source.inspectionobservations.find({}):
         "questionId":      qid,                     # ← raw ObjectId
         "sectionId":       q_to_section.get(sid(qid)) or o.get("sectionId"),
         "responseId":      o.get("responseId"),     # ← raw ObjectId
-        "assignedToId":    o.get("assignedTo"),
+        "assignedTo":    o.get("assignedTo"),
         "assignedToName":  assigned.get("name"),
         "description":     o.get("description"),
         "isIssue":         o.get("isIssue", False),
         "evidence":        o.get("evidence"),
         "hasAttachment":   o.get("hasAttachment", False),
         "attachmentCount": o.get("attachmentCount", 0),
-        "createdById":     o.get("createdBy"),
+        "createdBy":     o.get("createdBy"),
         "createdByName":   creator.get("name"),
         "tenantId":        o.get("tenantId"),
         **g,
@@ -562,9 +562,9 @@ for a in source.activities.find({}):
         "title":              a.get("title"),
         "tenantId":           a.get("tenantId"),
         "statusId":           a.get("statusId"),    # ← raw ObjectId
-        "statusDisplayName":  status_obj.get("displayName"),
+        # "statusDisplayName":  status_obj.get("displayName"),
         "statusKey":          status_obj.get("status"),
-        "assignedToId":       a.get("assignedTo"),
+        "assignedTo":       a.get("assignedTo"),
         "assignedToName":     assigned.get("name"),
         "assignedToEmail":    assigned.get("email"),
         "workflowId":         a.get("workflowId"), # ← raw ObjectId
@@ -576,7 +576,7 @@ for a in source.activities.find({}):
         "onFailure":          a.get("onFailure"),
         "activeActivity":     a.get("activeActivity"),
         "dependencyActivity": a.get("dependencyActivity"),
-        "createdById":        a.get("createdBy"),
+        "createdBy":        a.get("createdBy"),
         "createdByName":      creator.get("name"),
         "createdByEmail":     creator.get("email"),
         "isDeleted":          a.get("isDeleted", False),
@@ -603,9 +603,9 @@ for w in source.workflows.find({}):
         "title":              w.get("title"),
         "tenantId":           w.get("tenantId"),
         "statusId":           w.get("statusId"),    # ← raw ObjectId
-        "statusDisplayName":  status_obj.get("displayName"),
+        # "statusDisplayName":  status_obj.get("displayName"),
         "statusKey":          status_obj.get("status"),
-        "createdById":        w.get("createdBy"),
+        "createdBy":        w.get("createdBy"),
         "createdByName":      creator.get("name"),
         "createdByEmail":     creator.get("email"),
         "isDeleted":          w.get("isDeleted", False),
@@ -657,7 +657,7 @@ print(f"   tasks with statusKey         : {target[CONSOLIDATED].count_documents(
 print(f"   activities with statusKey    : {target[CONSOLIDATED].count_documents({'type':'activities','statusKey':{'$ne':None}})}")
 print(f"   workflows with statusKey     : {target[CONSOLIDATED].count_documents({'type':'workflows','statusKey':{'$ne':None}})}")
 print(f"   responsehistories w/ score   : {target[CONSOLIDATED].count_documents({'type':'responsehistories','scoreValue':{'$ne':None}})}")
-print(f"   inspObs with assignedToId    : {target[CONSOLIDATED].count_documents({'type':'inspectionobservations','assignedToId':{'$ne':None}})}")
+print(f"   inspObs with assignedTo    : {target[CONSOLIDATED].count_documents({'type':'inspectionobservations','assignedTo':{'$ne':None}})}")
 
 print("\n🔧 Creating indexes on flat_entities...")
 target[CONSOLIDATED].create_index("type")
@@ -668,6 +668,6 @@ target[CONSOLIDATED].create_index([("type", 1), ("inspectionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("questionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("sectionId", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("workflowId", 1)])
-target[CONSOLIDATED].create_index([("type", 1), ("assignedToId", 1)])
+target[CONSOLIDATED].create_index([("type", 1), ("assignedTo", 1)])
 target[CONSOLIDATED].create_index([("type", 1), ("executionId", 1)])
 print("   ✅ Indexes created")
